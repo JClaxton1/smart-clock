@@ -1,8 +1,9 @@
 // =====================================================================
-//  Smart Clock v2  -  STAGE 6: "thinking of you" messages (plus stage 5: updates over WiFi, health reports)
+//  Smart Clock v2  -  STAGE 7: reminders, rain warning, breathing guide
+//  (plus stage 6 messages and stage 5 updates over WiFi / health reports)
 //  Board: Seeed XIAO ESP32-C6        Serial Monitor: 115200 baud
 //  Keep these three files together in the sketch folder:
-//    smart_clock_stage6.ino   partitions.csv   clock_support.h
+//    smart_clock_stage7.ino   partitions.csv   clock_support.h
 //  partitions.csv gives the clock two 1.9 MB program slots: it downloads a new version into the
 //  spare slot, checks it, then switches. If the new version misbehaves it switches back by itself.
 //  (Tools > Partition Scheme can stay on "Huge APP" - the partitions.csv file overrides it.)
@@ -50,7 +51,8 @@
 #ifndef OTA_BASE_DEFAULT
 #define OTA_BASE_DEFAULT ""  // the GitHub Pages address; can also be typed in on the Setup tab
 #endif
-#define FW_SERIES 6
+#define FW_SERIES 7
+struct Reminder { char label[44]; uint8_t h, m, days; uint16_t year; uint8_t mon, mday; bool on; uint32_t lastFire; };   // days: bit 0 = Sunday; 0 = one date
 struct ClockMsg { String text; uint32_t at; bool seen; bool hearted; };   // a message shown on the clock
 struct NtfyMsg { String title, body, tags; int prio; };   // a message for the phone (ntfy)
 
@@ -63,6 +65,13 @@ bool msgLedOverride();
 void renderHeartbeat(uint32_t t);
 extern volatile uint32_t heartFlashUntil;
 extern volatile bool remoteClear;
+int stage7Override();
+void renderStage7(int ov, uint32_t t);
+bool stage7Gesture(int g);
+void parseRainSoon(JsonDocument &doc);
+void startBreathing();
+extern bool rainSoon;
+extern int rainHour;
 void addMessage(const String &text, uint32_t at);
 String cleanText(const String &in);
 void pollMessages();
@@ -229,8 +238,8 @@ float batteryMilliamps() { return inaRead(0x01) * 0.0025f / 0.1f; }
 // =====================================================================
 //  LIGHT + GESTURE SETTINGS (saved together as one block in flash)
 // =====================================================================
-enum Action : uint8_t { A_NONE, A_TOGGLE, A_NEXT, A_PREV, A_BRIGHTER, A_DIMMER, A_WEATHER, A_QR, A_COUNT };
-const char *ACTION_NAMES[A_COUNT] = {"Do nothing", "LEDs on / off", "Next effect", "Previous effect", "Brighter", "Dimmer", "Show weather", "Show settings QR code"};
+enum Action : uint8_t { A_NONE, A_TOGGLE, A_NEXT, A_PREV, A_BRIGHTER, A_DIMMER, A_WEATHER, A_QR, A_BREATHE, A_COUNT };
+const char *ACTION_NAMES[A_COUNT] = {"Do nothing", "LEDs on / off", "Next effect", "Previous effect", "Brighter", "Dimmer", "Show weather", "Show settings QR code", "Breathing guide"};
 enum Gesture : uint8_t { G_LEFT, G_RIGHT, G_UP, G_DOWN, G_TAP, G_HOLD, G_HOLD5, G_DOUBLE, G_COUNT };
 const char *GESTURE_NAMES[G_COUNT] = {"Swipe left", "Swipe right", "Swipe up", "Swipe down", "Tap", "Hold 2 s", "Hold 5 s", "Double tap"};
 const char *GESTURE_SHORT[G_COUNT] = {"LEFT", "RIGHT", "UP", "DOWN", "TAP", "HOLD 2s", "HOLD 5s", "DOUBLE TAP"};
@@ -585,7 +594,9 @@ void ledTask(void *) {
     vTaskDelayUntil(&last, pdMS_TO_TICKS(20));
     bool hb = !ledsLocate && msgLedOverride();                     // new-message heartbeat or "heart sent" burst
     bool flash = millis() < heartFlashUntil;
-    bool want = (ledsWanted || ledsLocate || hb) && ledsAllowed();
+    int ov = ledsLocate ? 0 : stage7Override();                   // breathing / reminder / rain shimmer
+    bool batOk = !(lowBattery || ledBatteryRest);
+    bool want = ((ledsWanted || ledsLocate || hb) && ledsAllowed()) || (ov && batOk && (ov != 1 || ledsAllowed()));
     if (ledsWanted && !ledsLocate && millis() - ledsLastActivity > min<uint32_t>(cfg.onSeconds, 3600) * 1000UL) ledsWanted = false;
     float target = want ? 1.0f : 0.0f;
     if (target > ledLevel) ledLevel = min(1.0f, ledLevel + 0.04f);      // 0.5 s fade in
@@ -593,6 +604,7 @@ void ledTask(void *) {
     if (ledLevel <= 0) { ledsPowerOff(); continue; }
     ledsPowerOn();
     bool hbDraw = hb && (flash || !ledsWanted);                    // her own light choice wins over the heartbeat
+    if (ov) { renderStage7(ov, millis()); ledsSend(ledLevel * (ov == 2 ? 0.7f : 0.5f)); continue; }
     if (hbDraw) renderHeartbeat(millis()); else renderEffect(millis());
     ledsSend(ledLevel * (ledsLocate ? 0.5f : hbDraw ? (flash ? 0.6f : 0.45f) : cfg.brightness / 255.0f));
   }
@@ -986,6 +998,7 @@ bool fetchWeather() {
   String url = "https://api.open-meteo.com/v1/forecast?latitude=" + String(lat, 4) + "&longitude=" + String(lon, 4) +
                "&current=temperature_2m,weather_code,is_day"
                "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+               "&hourly=precipitation_probability&forecast_hours=4"
                "&timezone=auto&forecast_days=1&temperature_unit=" + String(useF ? "fahrenheit" : "celsius");
   JsonDocument doc;
   if (!httpGetJson(url, doc)) return false;
@@ -995,6 +1008,7 @@ bool fetchWeather() {
   wx.hi = doc["daily"]["temperature_2m_max"][0] | 0.0f;
   wx.lo = doc["daily"]["temperature_2m_min"][0] | 0.0f;
   wx.rain = doc["daily"]["precipitation_probability_max"][0] | 0;
+  parseRainSoon(doc);
   long off = doc["utc_offset_seconds"] | 0L;
   if (off != wx.utcOffset || !wx.ok) {               // time zone / daylight saving change
     wx.utcOffset = off;
@@ -1063,6 +1077,12 @@ void drawMain(bool full) {
     centerText(hm, 100, 128, &BigTime);
     display.fillRect(14, 142, 172, 2, GxEPD_BLACK);
     centerText("INSIDE", 52, 162, &Small13);
+    if (rainSoon) {                                    // rain warning takes the humidity corner
+      char rh[10] = "SOON";
+      if (rainHour >= 0) { int h12 = rainHour % 12; if (h12 == 0) h12 = 12; snprintf(rh, sizeof rh, "%d %s", h12, rainHour < 12 ? "AM" : "PM"); }
+      strlcpy(hum, rh, sizeof hum);
+      centerText("RAIN AT", 150, 162, &Small13);
+    } else
     centerText("HUMIDITY", 150, 162, &Small13);
     centerText(temp, 52, 192, &Label27);
     centerText(hum, 150, 192, &Label27);
@@ -1175,7 +1195,7 @@ void updateAll(bool forceFull) {
   if (weatherShowing) { lastDraw = millis(); return; }
   struct tm tm; char key[64];
   bool ht = getLocalTime(&tm, 50);
-  snprintf(key, sizeof key, "%d|%d|%d|%.0f|%.0f|%d|%d", ht ? tm.tm_yday : -1, ht ? tm.tm_hour : -1, ht ? tm.tm_min : -1,
+  snprintf(key, sizeof key, "%d|%d|%d|%d|%.0f|%.0f|%d|%d", rainSoon ? rainHour + 100 : 0, ht ? tm.tm_yday : -1, ht ? tm.tm_hour : -1, ht ? tm.tm_min : -1,
            isnan(roomC) ? -99.0f : (useF ? roomC * 9 / 5 + 32 : roomC), roomRH, rotation, useF);
   if (forceFull || lastDrawnKey != key) {
     // a full (flashing) refresh once an hour clears e-paper ghosting; every other minute is a quiet partial refresh
@@ -1394,7 +1414,7 @@ void nextEffect(int dir) {
 }
 void doAction(int a, bool fromGesture) {
   bool wasOn = ledsWanted;
-  if (fromGesture && cfg.wakeOnAny && !wasOn && a != A_WEATHER && a != A_QR && a != A_NONE && a != A_TOGGLE) {
+  if (fromGesture && cfg.wakeOnAny && !wasOn && a != A_WEATHER && a != A_QR && a != A_NONE && a != A_TOGGLE && a != A_BREATHE) {
     ledsWanted = true; ledsLastActivity = millis();      // first gesture just wakes the ring
     return;
   }
@@ -1406,6 +1426,7 @@ void doAction(int a, bool fromGesture) {
     case A_DIMMER: cfg.brightness = max(10, cfg.brightness - 40); ledsWanted = true; break;
     case A_WEATHER: weatherUntil = millis() + 20000; qrUntil = 0; break;
     case A_QR: qrUntil = millis() + 60000; weatherUntil = 0; break;
+    case A_BREATHE: startBreathing(); break;
     default: break;
   }
   ledsLastActivity = millis();
@@ -1413,6 +1434,7 @@ void doAction(int a, bool fromGesture) {
 }
 void onGesture(int g) {
   lastGesture = g; lastGestureAt = millis(); gestureCount++;
+  if (stage7Gesture(g)) { Serial.printf("Gesture: %s -> reminder / breathing\n", GESTURE_SHORT[g]); return; }
   if (msgGesture(g)) { Serial.printf("Gesture: %s -> message\n", GESTURE_SHORT[g]); return; }
   int a = cfg.gestureAction[g];
   Serial.printf("Gesture: %s -> %s\n", GESTURE_SHORT[g], ACTION_NAMES[a]);
@@ -2127,6 +2149,284 @@ void msgLoop() {
   hbActive = hbGlowOn && unseenCount() > 0 && nowMs < hbUntil && !blocked;
 }
 
+// =====================================================================
+//  STAGE 7: reminders, rain warning, breathing guide
+//  Reminders: set on the settings page (Clock tab). When one is due the screen shows it and the ring
+//  glows gold, even in quiet hours (she asked for it). Wave = done, tap twice = snooze 10 minutes.
+//  Rain warning: if rain is likely in the next 3 hours, the screen's corner says when, and the ring
+//  shimmers blue once (not at night).
+//  Breathing guide: about a minute and a half of slow breathing led by the ring:
+//  in 4 s, hold 4 s, out 6 s, six times. Any wave stops it.
+// =====================================================================
+const int REM_MAX = 10;
+Reminder rems[REM_MAX];
+int remCount = 0;
+int remActive = -1;                 // reminder on screen now
+uint32_t remStart = 0, remSnoozeAt = 0;
+int remSnoozed = -1;
+volatile bool remDirty = false;
+const uint32_t REM_LIGHT_MS = 5UL * 60 * 1000, REM_SHOW_MS = 30UL * 60 * 1000;
+
+bool rainWarnOn = true;
+bool rainSoon = false;
+int rainHour = -1;                  // local hour it's likely to start
+uint32_t rainShimmerUntil = 0;
+
+volatile uint32_t breatheStart = 0; // 0 = not running
+const int BR_IN = 4000, BR_HOLD = 4000, BR_OUT = 6000, BR_CYCLES = 6;
+const int BR_CYCLE = BR_IN + BR_HOLD + BR_OUT;
+volatile bool brDirty = false;
+
+String daysText(uint8_t d) {
+  if (d == 0x7F) return "Every day";
+  if (d == 0x3E) return "Weekdays";
+  if (d == 0x41) return "Weekends";
+  const char *n[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  String s;
+  for (int i = 0; i < 7; i++) if (d & (1 << i)) { if (s.length()) s += " "; s += n[i]; }
+  return s;
+}
+String hm12(int h, int m) { char b[12]; int hh = h % 12; if (hh == 0) hh = 12; snprintf(b, sizeof b, "%d:%02d %s", hh, m, h < 12 ? "AM" : "PM"); return b; }
+
+void loadStage7() {
+  prefs.begin("clock", true);
+  String j = prefs.getString("rem", "");
+  rainWarnOn = prefs.getBool("rainwarn", true);
+  prefs.end();
+  JsonDocument d;
+  remCount = 0;
+  if (j.length() && !deserializeJson(d, j))
+    for (JsonObject o : d.as<JsonArray>()) {
+      if (remCount >= REM_MAX) break;
+      Reminder &r = rems[remCount++];
+      memset(&r, 0, sizeof r);
+      strlcpy(r.label, o["l"] | "Reminder", sizeof r.label);
+      r.h = o["h"] | 8; r.m = o["m"] | 0; r.days = o["d"] | 0;
+      r.year = o["y"] | 0; r.mon = o["mo"] | 0; r.mday = o["md"] | 0;
+      r.on = (o["on"] | 1) != 0; r.lastFire = o["lf"] | 0u;
+    }
+}
+void saveReminders() {
+  JsonDocument d;
+  JsonArray a = d.to<JsonArray>();
+  for (int i = 0; i < remCount; i++) {
+    Reminder &r = rems[i];
+    JsonObject o = a.add<JsonObject>();
+    o["l"] = r.label; o["h"] = r.h; o["m"] = r.m; o["d"] = r.days; o["y"] = r.year; o["mo"] = r.mon; o["md"] = r.mday; o["on"] = r.on ? 1 : 0; o["lf"] = r.lastFire;
+  }
+  String j; serializeJson(d, j);
+  prefs.begin("clock", false); prefs.putString("rem", j); prefs.end();
+}
+
+void fireReminder(int i) {
+  remActive = i; remStart = millis(); remDirty = true;
+  Serial.printf("Reminder: %s\n", rems[i].label);
+}
+void reminderLoop() {
+  struct tm t;
+  if (!getLocalTime(&t, 0)) return;
+  static int lastMin = -1;
+  if (t.tm_min != lastMin) {
+    lastMin = t.tm_min;
+    uint32_t today = (t.tm_year + 1900) * 1000 + t.tm_yday;
+    bool changed = false;
+    for (int i = 0; i < remCount; i++) {
+      Reminder &r = rems[i];
+      if (!r.on || r.h != t.tm_hour || r.m != t.tm_min || r.lastFire == today) continue;
+      bool due = r.days ? (r.days & (1 << t.tm_wday)) != 0
+                        : (r.year == t.tm_year + 1900 && r.mon == t.tm_mon + 1 && r.mday == t.tm_mday);
+      if (!due) continue;
+      r.lastFire = today;
+      if (!r.days) r.on = false;                               // a one-off is done once it has rung
+      changed = true;
+      fireReminder(i);
+    }
+    if (changed) saveReminders();
+  }
+  if (remSnoozed >= 0 && (int32_t)(millis() - remSnoozeAt) >= 0) { int i = remSnoozed; remSnoozed = -1; fireReminder(i); }
+  if (remActive >= 0 && millis() - remStart > REM_SHOW_MS) { remActive = -1; remDirty = true; }
+}
+bool reminderShowing() { return remActive >= 0 && remActive < remCount; }
+
+void drawBell(int x, int y) {
+  display.fillCircle(x, y + 6, 7, GxEPD_BLACK);
+  display.fillRect(x - 7, y + 6, 15, 7, GxEPD_BLACK);
+  display.fillRect(x - 9, y + 12, 19, 3, GxEPD_BLACK);
+  display.fillCircle(x, y + 17, 2, GxEPD_BLACK);
+}
+void drawReminder(bool full) {
+  if (!reminderShowing()) return;
+  Reminder r = rems[remActive];
+  struct tm t; char hm[12] = "";
+  if (getLocalTime(&t, 20)) { int h = t.tm_hour % 12; if (h == 0) h = 12; snprintf(hm, sizeof hm, "%d:%02d", h, t.tm_min); }
+  String lines[9]; int n = 0;
+  const GFXfont *f = &Label27; int lh = 30;
+  wrapLines(String(r.label), f, 184, lines, n, 9);
+  if (n > 4) { f = &Small13; lh = 17; wrapLines(String(r.label), f, 188, lines, n, 9); }
+  if (n > 8) n = 8;
+  display.setRotation(rotation);
+  if (full) display.setFullWindow(); else display.setPartialWindow(0, 0, display.width(), display.height());
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    drawBell(16, 6);
+    display.setFont(&Small13); display.setCursor(30, 22); display.print("Reminder");
+    display.setCursor(196 - textWidth(hm, &Small13), 22); display.print(hm);
+    display.fillRect(4, 32, 192, 2, GxEPD_BLACK);
+    int top = 42, bottom = 168;
+    int y = top + max(0, (bottom - top - n * lh) / 2) + lh - 6;
+    for (int k = 0; k < n; k++) { centerText(lines[k].c_str(), 100, y, f); y += lh; }
+    display.fillRect(4, 172, 192, 1, GxEPD_BLACK);
+    centerText("Wave: done   2 taps: snooze", 100, 192, &Small13);
+  } while (display.nextPage());
+  display.hibernate();
+}
+
+// ---------- rain warning (filled in by fetchWeather) ----------
+void parseRainSoon(JsonDocument &doc) {
+  // hourly data starts at the current hour (forecast_hours=4): look at now and the next 3 hours
+  bool was = rainSoon;
+  rainSoon = false; rainHour = -1;
+  bool rainingNow = (wx.code >= 51 && wx.code <= 67) || (wx.code >= 80 && wx.code <= 82) || wx.code >= 95;
+  JsonArray tms = doc["hourly"]["time"], pp = doc["hourly"]["precipitation_probability"];
+  for (size_t i = 0; i < pp.size() && i < tms.size() && i < 4; i++) {
+    if ((int)(pp[i] | 0) >= 60) {
+      String ts = tms[i] | "";                                 // e.g. "2026-10-13T16:00" (local time)
+      rainSoon = true; rainHour = ts.length() >= 13 ? ts.substring(11, 13).toInt() : -1;
+      break;
+    }
+  }
+  if (rainingNow || !rainWarnOn) rainSoon = false;            // already raining, or switched off
+  if (rainSoon && !was && ledsAllowed()) rainShimmerUntil = millis() + 8000;
+}
+
+// ---------- breathing guide ----------
+bool breathing() {
+  if (!breatheStart) return false;
+  if (millis() - breatheStart >= (uint32_t)BR_CYCLE * BR_CYCLES) { breatheStart = 0; brDirty = true; return false; }
+  return true;
+}
+void startBreathing() { breatheStart = millis(); if (!breatheStart) breatheStart = 1; brDirty = true; }
+// phase: 0 in, 1 hold, 2 out; frac 0..1 through it; cycle 0..5
+void breathPhase(uint32_t t, int &phase, float &frac, int &cycle) {
+  uint32_t e = t - breatheStart;
+  cycle = e / BR_CYCLE;
+  int in = e % BR_CYCLE;
+  if (in < BR_IN) { phase = 0; frac = in / (float)BR_IN; }
+  else if (in < BR_IN + BR_HOLD) { phase = 1; frac = (in - BR_IN) / (float)BR_HOLD; }
+  else { phase = 2; frac = (in - BR_IN - BR_HOLD) / (float)BR_OUT; }
+}
+void drawBreathe(bool full) {
+  int phase, cycle; float frac;
+  breathPhase(millis(), phase, frac, cycle);
+  const char *word = phase == 0 ? "Breathe in" : phase == 1 ? "Hold" : "Breathe out";
+  char sub[24]; snprintf(sub, sizeof sub, "%d of %d", cycle + 1, BR_CYCLES);
+  display.setRotation(rotation);
+  if (full) display.setFullWindow(); else display.setPartialWindow(0, 0, display.width(), display.height());
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    centerText(word, 100, 100, &Label27);
+    centerText(sub, 100, 130, &Small13);
+    centerText("Wave to stop", 100, 192, &Small13);
+  } while (display.nextPage());
+  display.hibernate();
+}
+
+// ---------- the ring ----------
+// 0 nothing, 1 rain shimmer, 2 reminder, 3 breathing
+int stage7Override() {
+  if (millis() < heartFlashUntil) return 0;
+  if (breathing()) return 3;
+  if (reminderShowing() && millis() - remStart < REM_LIGHT_MS) return 2;
+  if (millis() < rainShimmerUntil) return 1;
+  return 0;
+}
+void renderStage7(int ov, uint32_t t) {
+  int n = cfg.ledCount;
+  memset(px, 0, sizeof px);
+  if (ov == 3) {                                             // breathing: light rises up both sides from 6 to 12
+    int phase, cycle; float frac;
+    breathPhase(t, phase, frac, cycle);
+    float level = phase == 0 ? 0.5f - 0.5f * cosf(frac * PI) : phase == 1 ? 1.0f : 0.5f + 0.5f * cosf(frac * PI);
+    float reach = level * 180.0f;                            // degrees up from 6 o'clock on each side
+    for (int i = 0; i < n; i++) {
+      // angle of LED i from 6 o'clock (0..180 either way)
+      float deg = cfg.ledClockwise ? i * 360.0f / n + (cfg.ledStartHour % 12) * 30.0f : (cfg.ledStartHour % 12) * 30.0f - i * 360.0f / n;
+      float fromSix = angDist(deg, 180);
+      float f = fromSix <= reach ? 1.0f : max(0.0f, 1.0f - (fromSix - reach) / 12.0f);
+      float g = 0.12f + 0.88f * f;
+      setPx(i, 40 * g, 170 * g, 160 * g);
+    }
+  } else if (ov == 2) {                                      // reminder: warm gold sweep that pulses
+    float s = fmodf(t / 1600.0f, 1.0f) * 360.0f;
+    float base = 0.25f + 0.15f * sinf(t / 300.0f);
+    for (int i = 0; i < n; i++) setPx(i, 255 * base, 150 * base, 20 * base);
+    blob(ledAt(s), 6.0f, 255, 190, 60);
+    blob(ledAt(s + 180), 6.0f, 255, 190, 60);
+  } else if (ov == 1) {                                      // rain soon: blue drops down both sides
+    for (int i = 0; i < n; i++) setPx(i, 0, 10, 30);
+    for (int d = 0; d < 4; d++) {
+      float ph = fmodf(t / 1800.0f + d * 0.25f, 1.0f) * 180.0f;
+      blob(ledAt(ph), 1.8f, 120, 180, 255);
+      blob(ledAt(360 - ph), 1.8f, 120, 180, 255);
+    }
+  }
+}
+
+// ---------- gestures ----------
+bool stage7Gesture(int g) {
+  if (breathing()) { breatheStart = 0; brDirty = true; return true; }       // any wave stops the breathing guide
+  if (reminderShowing()) {
+    if (g == G_DOUBLE) { remSnoozed = remActive; remSnoozeAt = millis() + 10UL * 60 * 1000; }
+    remActive = -1; remDirty = true;
+    return true;
+  }
+  return false;
+}
+
+// ---------- settings page: /rem?op=add|del|toggle ----------
+void handleReminders() {
+  String op = server.arg("op"), msg = "Done";
+  if (op == "add") {
+    if (remCount >= REM_MAX) msg = "That's the most reminders the clock can hold - delete one first";
+    else {
+      Reminder r; memset(&r, 0, sizeof r);
+      String label = cleanText(server.arg("label"));
+      if (label.isEmpty()) label = "Reminder";
+      strlcpy(r.label, label.c_str(), sizeof r.label);
+      int hh = 0, mm = 0;
+      sscanf(server.arg("time").c_str(), "%d:%d", &hh, &mm);
+      r.h = constrain(hh, 0, 23); r.m = constrain(mm, 0, 59);
+      r.days = server.arg("days").toInt() & 0x7F;
+      if (!r.days) {
+        int y = 0, mo = 0, md = 0;
+        if (sscanf(server.arg("date").c_str(), "%d-%d-%d", &y, &mo, &md) != 3) { server.send(200, "text/plain", "Please pick a date"); return; }
+        r.year = y; r.mon = mo; r.mday = md;
+      }
+      r.on = true;
+      rems[remCount++] = r;
+      saveReminders();
+      msg = "Reminder saved";
+    }
+  } else if (op == "del" || op == "toggle") {
+    int i = server.arg("i").toInt();
+    if (i >= 0 && i < remCount) {
+      if (op == "del") {
+        for (int k = i; k < remCount - 1; k++) rems[k] = rems[k + 1];
+        remCount--;
+        if (remActive == i) remActive = -1; else if (remActive > i) remActive--;
+        if (remSnoozed == i) remSnoozed = -1; else if (remSnoozed > i) remSnoozed--;
+        msg = "Reminder deleted";
+      } else { rems[i].on = !rems[i].on; rems[i].lastFire = 0; msg = rems[i].on ? "Reminder on" : "Reminder off"; }
+      saveReminders();
+    }
+  } else if (op == "test") { if (remCount) fireReminder(remCount - 1); msg = "Showing it on the clock now"; }
+  server.send(200, "text/plain", msg);
+}
+
 void handlePage() {
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "text/html", SETTINGS_PAGE);
@@ -2149,6 +2449,13 @@ void handleState() {
   s["em"] = cfg.effectMask; s["chime"] = cfg.hourChime ? 1 : 0; s["fast"] = (int)fastMs; s["pulse"] = (int)pulseMs;
   s["units"] = useF ? "F" : "C"; s["zip"] = zipCode;
   s["hbglow"] = hbGlowOn ? 1 : 0;
+  s["rainwarn"] = rainWarnOn ? 1 : 0;
+  JsonArray ra = s["rem"].to<JsonArray>();
+  for (int i = 0; i < remCount; i++) {
+    JsonObject o = ra.add<JsonObject>();
+    o["l"] = rems[i].label; o["on"] = rems[i].on ? 1 : 0;
+    o["when"] = hm12(rems[i].h, rems[i].m) + ", " + (rems[i].days ? daysText(rems[i].days) : String(rems[i].mon) + "/" + String(rems[i].mday) + "/" + String(rems[i].year));
+  }
   s["autoupd"] = autoUpdate ? 1 : 0; s["health"] = healthOn ? 1 : 0; s["otaurl"] = otaBase; s["ntfy"] = ntfyTopic;
 
   JsonObject l = j["live"].to<JsonObject>();
@@ -2206,6 +2513,10 @@ void handleState() {
   xSemaphoreGive(msgLock);
   l["amb"] = apdsOK && !apdsIs9960 ? ambientLevel() : -1;
   l["gblock"] = sensorBlocked();
+  if (rainSoon) {
+    int h12 = rainHour % 12; if (h12 == 0) h12 = 12;
+    l["rain"] = rainHour >= 0 ? "Rain likely around " + String(h12) + (rainHour < 12 ? " AM" : " PM") : String("Rain likely soon");
+  }
   l["ver"] = fwVersion();
   l["upd"] = otaState == 1 ? String("Checking...") : otaState == 2 ? "Downloading " + String(otaPct) + "%" : otaState == 3 ? String("Restarting...") : otaStatus;
   l["uptime"] = uptimeText();
@@ -2246,6 +2557,7 @@ void handleSet() {
     prefs.begin("clock", false);
     if (k == "fast" && n >= 10 && n <= 62) { fastMs = n; prefs.putUShort("fast", n); }
     else if (k == "pulse" && n >= 3 && n <= 30) { pulseMs = n; prefs.putUChar("pulse", n); }
+    else if (k == "rainwarn") { rainWarnOn = n != 0; prefs.putBool("rainwarn", rainWarnOn); if (!rainWarnOn) rainSoon = false; lastDrawnKey = ""; }
     else if (k == "hbglow") { hbGlowOn = n != 0; prefs.putBool("hbglow", hbGlowOn); if (!hbGlowOn) hbUntil = 0; }
     else if (k == "autoupd") { autoUpdate = n != 0; prefs.putBool("autoupd", autoUpdate); }
     else if (k == "health") { healthOn = n != 0; prefs.putBool("health", healthOn); }
@@ -2309,6 +2621,7 @@ void handleDo() {
     return;
   }
   else if (a == "update") { wantUpdate = true; msg = "Checking for an update..."; }
+  else if (a == "breathe") { startBreathing(); msg = "Breathing guide starting on the clock"; }
   else if (a == "msgseen") { for (int i = 0; i < msgCount; i++) markSeen(i, " (on the settings page)"); msg = "Marked as seen"; }
   else if (a == "msgheart") {
     int i = msgCount - 1;
@@ -2332,6 +2645,7 @@ void startSettingsServer() {
   server.on("/state", HTTP_GET, handleState);
   server.on("/set", HTTP_GET, handleSet);
   server.on("/do", HTTP_GET, handleDo);
+  server.on("/rem", HTTP_GET, handleReminders);
   server.onNotFound([] { server.sendHeader("Location", "/"); server.send(302, "text/plain", ""); });
   server.begin();
   if (MDNS.begin("smartclock")) MDNS.addService("http", "tcp", 80);
@@ -2350,11 +2664,12 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
   delay(500);
-  Serial.println("\nSmart Clock v2 - stage 6");
+  Serial.println("\nSmart Clock v2 - stage 7");
   loadSettings();
   stage5Begin();
   msgLock = xSemaphoreCreateMutex();
   loadMsgs();
+  loadStage7();
 
   // where are the hands? RTC memory (exact, survives resets) or flash (last minute-save)
   if (rtcMagic == 0xC10C2026 && (rtcPos ^ 0xA5A5A5A5) == rtcCheck && rtcPos < (uint32_t)CYCLE) {
@@ -2421,16 +2736,25 @@ void loop() {
 
     // weather screen for 20 s, then back to the clock screen
     msgLoop();
-    uint8_t want = millis() < qrUntil ? 2 : millis() < weatherUntil ? 1 : msgShow >= 0 ? 3 : 0;
-    static int msgMin = -1;
+    reminderLoop();
+    // what the screen shows: QR code > weather > breathing guide > reminder > message > the clock
+    uint8_t want = millis() < qrUntil ? 2 : millis() < weatherUntil ? 1 : breathing() ? 5 : reminderShowing() ? 4 : msgShow >= 0 ? 3 : 0;
+    static int ovMin = -1, brPhase = -1;
     struct tm mt; int curMin = getLocalTime(&mt, 0) ? mt.tm_min : -1;
-    if (want == 3 && overlayShown == 3 && (msgDirty || curMin != msgMin)) {      // message screen: changes + the minute
-      msgDirty = false; msgMin = curMin; drawMsgScreen(false);
+    int ph = -1;
+    if (want == 5) { int c; float f; breathPhase(millis(), ph, f, c); ph += c * 3; }
+    auto drawOv = [&](uint8_t w, bool full) {
+      msgDirty = remDirty = brDirty = false; ovMin = curMin; brPhase = ph;
+      if (w == 3) drawMsgScreen(full); else if (w == 4) drawReminder(full); else drawBreathe(full);
+    };
+    if (want >= 3 && overlayShown == want) {
+      bool dirty = want == 3 ? (msgDirty || curMin != ovMin) : want == 4 ? (remDirty || curMin != ovMin) : (ph != brPhase);
+      if (dirty) drawOv(want, false);
     }
     if (want != overlayShown) {
       overlayShown = want;
       weatherShowing = want != 0;
-      if (want == 3) { msgDirty = false; msgMin = curMin; drawMsgScreen(true); }
+      if (want >= 3) drawOv(want, true);
       else if (want == 1) drawWeather();
       else if (want == 2) {
         String url = "http://" + WiFi.localIP().toString() + "/";
@@ -3520,7 +3844,7 @@ header{padding:6px 2px 16px}
 /* slider */
 input[type=range]{width:100%;accent-color:var(--acc);height:34px}
 .sun{display:flex;align-items:center;gap:10px}.sun svg{flex:none;color:var(--mut)}
-select,input[type=text],input[type=number]{font:inherit;font-size:16px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);max-width:100%}
+select,input[type=text],input[type=number],input[type=time],input[type=date]{font:inherit;font-size:16px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);max-width:100%}
 .btn{font:inherit;font-size:16px;font-weight:600;padding:13px 16px;border-radius:14px;border:0;background:var(--acc);color:var(--accInk);cursor:pointer;width:100%}
 .btn.ghost{background:transparent;color:var(--acc);border:1.5px solid var(--acc)}
 .btns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
@@ -3558,6 +3882,17 @@ fieldset[disabled] .card .small{opacity:1}
 .msgs li:first-child{border-top:0}
 .msgs li.new>div:first-child{font-weight:600}
 .msgs li.new>div:first-child::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--acc);margin-right:8px;vertical-align:middle}
+.remrow{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.rembtns{display:flex;gap:6px;flex-shrink:0}
+.btn.sm{width:auto;padding:6px 10px;font-size:14px}
+.addrem{margin-top:12px}
+.addrem summary{list-style:none;text-align:center;cursor:pointer}
+.addrem summary::-webkit-details-marker{display:none}
+.addrem label{display:block;font-size:14px;color:var(--mut);margin:12px 0 6px}
+.addrem input[type=text],.addrem input[type=time],.addrem input[type=date],.addrem select{width:100%}
+.addrem .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.days{display:flex;gap:6px;flex-wrap:wrap}
+.day{display:flex!important;align-items:center;gap:4px;margin:0!important;padding:6px 8px;border:1px solid var(--line);border-radius:8px;color:var(--ink)!important}
 /* bottom sheet */
 .shade{position:fixed;inset:0;background:rgba(20,10,4,.45);display:none;z-index:9}
 .shade.on{display:block}
@@ -3600,6 +3935,13 @@ fieldset[disabled] .card .small{opacity:1}
       <div class="row">
         <div><div class="big">Ring light</div><div class="small" id="lightNote">Off</div></div>
         <label class="sw"><input type="checkbox" id="on" aria-label="Ring light"><span></span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div><div class="big" style="font-size:18px">Breathing guide</div><div class="small">The ring rises and falls slowly: breathe in, hold, breathe out. About a minute and a half. Wave to stop.</div></div>
+        <button class="btn" style="width:auto" onclick="act('breathe',null,'Breathing guide starting')">Start</button>
       </div>
     </div>
 
@@ -3687,6 +4029,24 @@ fieldset[disabled] .card .small{opacity:1}
     </div>
 
     <div class="card">
+      <h2>Reminders</h2>
+      <div class="small" id="remEmpty">No reminders yet. When one is due, the screen shows it and the ring glows gold. Wave to finish it, or tap twice to snooze 10 minutes.</div>
+      <ul class="msgs" id="remList"></ul>
+      <details class="addrem" id="remAdd">
+        <summary class="btn ghost">Add a reminder</summary>
+        <label for="remLabel">What to remember</label>
+        <input type="text" id="remLabel" maxlength="40" placeholder="Water the plants">
+        <div class="two">
+          <div><label for="remTime">Time</label><input type="time" id="remTime" value="08:00"></div>
+          <div><label for="remRep">Repeat</label><select id="remRep"><option value="0">Once</option><option value="127">Every day</option><option value="62">Weekdays</option><option value="65">Weekends</option><option value="pick">Pick days</option></select></div>
+        </div>
+        <div id="remDateBox"><label for="remDate">Date</label><input type="date" id="remDate"></div>
+        <div id="remDaysBox" class="hide"><label>Days</label><div class="days" id="remDays"></div></div>
+        <button class="btn" style="margin-top:12px" onclick="addRem()">Save reminder</button>
+      </details>
+    </div>
+
+    <div class="card">
       <h2>Clock hands</h2>
       <div class="row"><div class="big" id="handsShow">--:--:--</div><span class="chip" id="handsChip">On time</span></div>
       <div class="small" id="handsNote" style="margin-top:6px"></div>
@@ -3705,6 +4065,8 @@ fieldset[disabled] .card .small{opacity:1}
       <div class="btns">
         <button class="btn ghost" onclick="act('weather',null,'Weather on the screen for 20 s')">Show weather</button>
       </div>
+      <label class="chk" style="margin-top:12px"><input type="checkbox" id="rainwarn"> Rain warning: show on the screen when rain is likely in the next few hours</label>
+      <div class="small" id="rainNow"></div>
     </div>
 
     <div class="card">
@@ -3832,7 +4194,7 @@ fieldset[disabled] .card .small{opacity:1}
 
 <script>
 const EFFECTS=[["Warm glow","r-glow"],["Breathing","r-breathe"],["Rainbow","r-rainbow"],["Hour markers","r-markers"],["Comet","r-comet"],["Twinkle","r-twinkle"],["Ferris wheel","r-ferris"],["Second-hand orbit","r-orbit"],["Ocean","r-ocean"],["Aurora","r-aurora"],["Candle","r-candle"],["Weather colours","r-weather"]];
-const ACTIONS=["Nothing","Light on / off","Next style","Previous style","Brighter","Dimmer","Show weather","Show QR code"];
+const ACTIONS=["Nothing","Light on / off","Next style","Previous style","Brighter","Dimmer","Show weather","Show QR code","Breathing guide"];
 const GESTURES=[["Swipe left","M19 12H5M11 6l-6 6 6 6"],["Swipe right","M5 12h14M13 6l6 6-6 6"],["Swipe up","M12 19V5M6 11l6-6 6 6"],["Swipe down","M12 5v14M6 13l6 6 6-6"],
  ["Tap","M12 4v10M8 10l4 4 4-4M6 20h12"],["Hold 2 seconds","M12 7v5l3 2M12 3a9 9 0 1 0 0.01 0"],["Hold 5 seconds","M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h3M20 14v3M14 20h6"],["Double tap","M8 4v8M5 9l3 3 3-3M16 4v8M13 9l3 3 3-3M5 18h14"]];
 const COLOURS=[["Amber","#ff8c3c"],["Candle","#ffb060"],["Soft white","#ffe2c0"],["Rose","#ff5d73"],["Ocean","#3fa0ff"],["Forest","#3fbf6a"]];
@@ -3841,6 +4203,14 @@ const $=id=>document.getElementById(id);
 function toast(t){if(!t)return;const e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),2200)}
 function hour12(h){return (h%12||12)+(h<12?' AM':' PM')}
 function setv(k,v,msg){S[k]=v;busy=Date.now();fetch('/set?k='+k+'&v='+encodeURIComponent(v)).then(r=>r.text()).then(t=>{toast(msg||t||'Saved');refresh()}).catch(()=>toast('Could not reach the clock'))}
+// reminders
+(function(){const n=['S','M','T','W','T','F','S'];$('remDays').innerHTML=n.map((d,i)=>`<label class="day"><input type="checkbox" data-b="${i}">${d}</label>`).join('');
+ const t=new Date();t.setDate(t.getDate()+1);$('remDate').value=t.toISOString().slice(0,10);
+ $('remRep').onchange=()=>{const v=$('remRep').value;$('remDateBox').classList.toggle('hide',v!=='0');$('remDaysBox').classList.toggle('hide',v!=='pick')};})();
+function addRem(){let d=$('remRep').value;if(d==='pick'){d=0;document.querySelectorAll('#remDays input').forEach(c=>{if(c.checked)d|=1<<c.dataset.b});if(!d){toast('Pick at least one day');return}}
+ const q='op=add&label='+encodeURIComponent($('remLabel').value)+'&time='+encodeURIComponent($('remTime').value)+'&days='+d+'&date='+encodeURIComponent($('remDate').value);
+ fetch('/rem?'+q).then(r=>r.text()).then(t=>{toast(t);$('remLabel').value='';$('remAdd').open=false;setTimeout(refresh,300)}).catch(()=>toast('Could not reach the clock'))}
+function remOp(op,i){if(op==='del'&&!confirm('Delete this reminder?'))return;fetch('/rem?op='+op+'&i='+i).then(r=>r.text()).then(t=>{toast(t);setTimeout(refresh,300)})}
 function esc(t){return String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function act(a,v,msg){fetch('/do?a='+a+(v!=null?'&v='+encodeURIComponent(v):'')).then(r=>r.text()).then(t=>{toast(msg||t);setTimeout(refresh,300)}).catch(()=>toast('Could not reach the clock'))}
 
@@ -3864,7 +4234,7 @@ $('emask').onchange=()=>{let m=0;document.querySelectorAll('#emask input').forEa
 $('on').onchange=e=>setv('on',e.target.checked?1:0,e.target.checked?'Light on':'Light off');
 let bt;$('bright').oninput=e=>{clearTimeout(bt);bt=setTimeout(()=>setv('bright',e.target.value,'Brightness set'),250)};
 ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>$(k).onchange=e=>setv(k,e.target.value));
-['night','wake','smir','chime','autoupd','health','hbglow'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
+['night','wake','smir','chime','autoupd','health','hbglow','rainwarn'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
 $('units').onclick=e=>{const b=e.target.closest('button');if(b)setv('units',b.dataset.v)};
 
 // tabs
@@ -3899,7 +4269,7 @@ function paint(){
   document.querySelector('.dot.custom').classList.toggle('sel',!matched);
   if(Date.now()-busy>1500){$('bright').value=S.bright;}
   ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
-  ['night','wake','smir','chime','autoupd','health','hbglow'].forEach(k=>$(k).checked=!!S[k]);
+  ['night','wake','smir','chime','autoupd','health','hbglow','rainwarn'].forEach(k=>$(k).checked=!!S[k]);
   $('nightTimes').classList.toggle('hide',!S.night);
   if(S.g)S.g.forEach((a,i)=>$('gp'+i).textContent=ACTIONS[a]);
   document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('sel',b.dataset.v===S.units));
@@ -3926,6 +4296,9 @@ function live(){
   $('gIntro').textContent=swipes?'Swipe or tap over the little window just below the clock hands, a few centimetres away.':'Bring your hand toward the little window just below the clock hands, a few centimetres away, then take it away again. Tap, tap twice, or hold your hand there.';$('place').textContent=L.place||'';
   const ms=L.msgs||[];$('msgEmpty').classList.toggle('hide',ms.length>0);$('msgBtns').classList.toggle('hide',!ms.length);
   $('msgList').innerHTML=ms.map(m=>`<li class="${m.seen?'':'new'}"><div>${esc(m.t)}</div><div class="small">${m.ago}${m.seen?' · seen':' · new'}${m.heart?' · heart sent':''}</div></li>`).join('');
+  const rs=S.rem||[];$('remEmpty').classList.toggle('hide',rs.length>0);
+  $('remList').innerHTML=rs.map((r,i)=>`<li class="rem"><div class="remrow"><div><div>${esc(r.l)}</div><div class="small">${esc(r.when)}${r.on?'':' · off'}</div></div><div class="rembtns"><button class="btn ghost sm" onclick="remOp('toggle',${i})">${r.on?'Turn off':'Turn on'}</button><button class="btn ghost sm" onclick="remOp('del',${i})">Delete</button></div></div></li>`).join('');
+  $('rainNow').textContent=L.rain||'';
   $('ver').textContent=L.ver||'-';$('uptime').textContent=L.uptime||'-';$('upd').textContent=L.upd||'-';
   if(S.ntfy){$('ntfyShow').textContent=S.ntfy;$('ntfyLink').href='https://ntfy.sh/'+S.ntfy;}
   ['otaurl','ntfy'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
