@@ -1,8 +1,8 @@
 // =====================================================================
-//  Smart Clock v2  -  STAGE 5: updates over WiFi, health reports, remote restart
+//  Smart Clock v2  -  STAGE 6: "thinking of you" messages (plus stage 5: updates over WiFi, health reports)
 //  Board: Seeed XIAO ESP32-C6        Serial Monitor: 115200 baud
 //  Keep these three files together in the sketch folder:
-//    smart_clock_stage5.ino   partitions.csv   clock_support.h
+//    smart_clock_stage6.ino   partitions.csv   clock_support.h
 //  partitions.csv gives the clock two 1.9 MB program slots: it downloads a new version into the
 //  spare slot, checks it, then switches. If the new version misbehaves it switches back by itself.
 //  (Tools > Partition Scheme can stay on "Huge APP" - the partitions.csv file overrides it.)
@@ -50,13 +50,23 @@
 #ifndef OTA_BASE_DEFAULT
 #define OTA_BASE_DEFAULT ""  // the GitHub Pages address; can also be typed in on the Setup tab
 #endif
-#define FW_SERIES 5
+#define FW_SERIES 6
+struct ClockMsg { String text; uint32_t at; bool seen; bool hearted; };   // a message shown on the clock
 struct NtfyMsg { String title, body, tags; int prio; };   // a message for the phone (ntfy)
 
 // fonts (bitmaps are at the bottom of this file)
 extern const GFXfont BigTime, Label27, Small13;
 void drawQR(const char *title, const char *payload, const char *line1, const char *line2, bool full);
 bool stage5Command(const String &cmd);
+bool msgGesture(int g);
+bool msgLedOverride();
+void renderHeartbeat(uint32_t t);
+extern volatile uint32_t heartFlashUntil;
+void addMessage(const String &text, uint32_t at);
+String cleanText(const String &in);
+void pollMessages();
+void msgLoop();
+void drawMsgScreen(bool full);
 const char *conditionText(int c);
 
 // ---------------- pins (from the main board) ----------------
@@ -572,15 +582,18 @@ void ledTask(void *) {
   TickType_t last = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&last, pdMS_TO_TICKS(20));
-    bool want = (ledsWanted || ledsLocate) && ledsAllowed();
+    bool hb = !ledsLocate && msgLedOverride();                     // new-message heartbeat or "heart sent" burst
+    bool flash = millis() < heartFlashUntil;
+    bool want = (ledsWanted || ledsLocate || hb) && ledsAllowed();
     if (ledsWanted && !ledsLocate && millis() - ledsLastActivity > min<uint32_t>(cfg.onSeconds, 3600) * 1000UL) ledsWanted = false;
     float target = want ? 1.0f : 0.0f;
     if (target > ledLevel) ledLevel = min(1.0f, ledLevel + 0.04f);      // 0.5 s fade in
     else if (target < ledLevel) ledLevel = max(0.0f, ledLevel - 0.025f); // 0.8 s fade out
     if (ledLevel <= 0) { ledsPowerOff(); continue; }
     ledsPowerOn();
-    renderEffect(millis());
-    ledsSend(ledLevel * (ledsLocate ? 0.5f : cfg.brightness / 255.0f));
+    bool hbDraw = hb && (flash || !ledsWanted);                    // her own light choice wins over the heartbeat
+    if (hbDraw) renderHeartbeat(millis()); else renderEffect(millis());
+    ledsSend(ledLevel * (ledsLocate ? 0.5f : hbDraw ? (flash ? 0.6f : 0.45f) : cfg.brightness / 255.0f));
   }
 }
 
@@ -1397,6 +1410,7 @@ void doAction(int a, bool fromGesture) {
 }
 void onGesture(int g) {
   lastGesture = g; lastGestureAt = millis(); gestureCount++;
+  if (msgGesture(g)) { Serial.printf("Gesture: %s -> message\n", GESTURE_SHORT[g]); return; }
   int a = cfg.gestureAction[g];
   Serial.printf("Gesture: %s -> %s\n", GESTURE_SHORT[g], ACTION_NAMES[a]);
   if (cfg.wakeOnAny && !ledsWanted && a == A_NONE) { ledsWanted = true; ledsLastActivity = millis(); return; }
@@ -1722,6 +1736,8 @@ void netTask(void *) {
       if (!reported) { reported = true; bootReport(); }
       // 2. commands, once a minute
       if (now - lastPoll > 60000 || lastPoll == 0) { lastPoll = now; pollCommands(); }
+      static uint32_t lastMsgPoll = 0;
+      if (now - lastMsgPoll > 30000 || lastMsgPoll == 0) { lastMsgPoll = now; pollMessages(); }
       // 3. health report every 6 hours (quiet: no sound on the phone)
       if (healthOn && (lastBeat == 0 ? now > 180000 : now - lastBeat > 6UL * 3600 * 1000)) {
         lastBeat = now;
@@ -1757,6 +1773,7 @@ void stage5Begin() {
 bool stage5Command(const String &cmd) {         // Serial Monitor commands for stage 5
   if (cmd == "v") { Serial.println(statusLine()); Serial.println("Updates: " + otaStatus + "   address: " + (otaBase.isEmpty() ? String("(not set)") : otaBase)); }
   else if (cmd == "update") { wantUpdate = true; Serial.println("Checking for an update..."); }
+  else if (cmd.startsWith("msg ")) { addMessage(cleanText(cmd.substring(4)), timeKnown() ? (uint32_t)time(nullptr) : 0); Serial.println("Test message added"); }
   else if (cmd == "restart") { restartPending = true; restartAt = millis() + 500; }
   else if (cmd == "ntfy") { Serial.printf("Health reports: https://ntfy.sh/%s\nCommands go to: %s-cmd\n", ntfyTopic.c_str(), ntfyTopic.c_str()); notify("Test from the clock", statusLine(), "wave", 3); }
   else if (cmd.startsWith("ota ")) { String v = cmd.substring(4); v.trim(); while (v.endsWith("/")) v.remove(v.length() - 1); otaBase = v; prefs.begin("clock", false); prefs.putString("otaurl", v); prefs.end(); Serial.println("Update address: " + v); }
@@ -1793,6 +1810,302 @@ void stage5Loop() {
   }
 }
 
+// =====================================================================
+//  STAGE 6: "thinking of you" messages
+//  Send a message to <topic>-msg in the ntfy app. The clock shows it on its little screen, glows a
+//  soft heartbeat until Amanda notices, and tells you on <topic> when it was delivered and seen.
+//  While a message is on the screen:  tap = send a heart back,  tap twice = next message / back
+//  to the clock. Any gesture at all counts as "seen". Quiet hours are respected: no glow at night,
+//  and the heartbeat starts again in the morning and when the room lights come on.
+// =====================================================================
+const char *RECIPIENT = "Amanda";
+const int MSG_MAX = 5;
+const uint32_t HEARTBEAT_MS = 30UL * 60 * 1000;        // glow for 30 minutes after a message arrives
+const uint32_t SEEN_KEEP_MS = 10UL * 60 * 1000;        // a seen message stays up 10 minutes after the last wave
+ClockMsg msgs[MSG_MAX];
+int msgCount = 0;                                      // oldest first
+int msgShow = -1;                                      // message on the screen, -1 = none
+uint32_t msgTouchAt = 0;                               // last gesture on the message screen
+uint32_t msgNoteUntil = 0;                             // "Heart sent" line shown until
+volatile bool msgDirty = false, msgSaveNeeded = false;
+volatile uint32_t hbUntil = 0;                         // heartbeat glow runs until (millis)
+volatile uint32_t heartFlashUntil = 0;                 // pink "heart sent" burst until (millis)
+volatile bool hbActive = false;                        // read by the LED task
+bool hbGlowOn = true;                                  // setting: heartbeat glow for new messages
+uint32_t lastMsgTime = 0;                              // newest ntfy message time handled (unix)
+String recentMsgIds;
+SemaphoreHandle_t msgLock = nullptr;
+
+int unseenCount() { int n = 0; for (int i = 0; i < msgCount; i++) if (!msgs[i].seen) n++; return n; }
+
+// the screen fonts only have plain letters: turn curly quotes, dashes and hearts into ones they have
+String cleanText(const String &in) {
+  String o;
+  for (int i = 0; i < (int)in.length(); i++) {
+    uint8_t c = in[i];
+    if (c == '\n' || c == '\r' || c == '\t') { o += ' '; continue; }
+    if (c == '`') { o += '\''; continue; }                    // ` draws a degree sign in these fonts
+    if (c < 0x80) { if (c >= 0x20) o += (char)c; continue; }
+    int len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    String seq = in.substring(i, i + len);
+    i += len - 1;
+    if (seq == "\xE2\x80\x9C" || seq == "\xE2\x80\x9D") o += '"';
+    else if (seq == "\xE2\x80\x98" || seq == "\xE2\x80\x99") o += '\'';
+    else if (seq == "\xE2\x80\x93" || seq == "\xE2\x80\x94") o += '-';
+    else if (seq == "\xE2\x80\xA6") o += "...";
+    else if (seq == "\xE2\x9D\xA4" || seq == "\xE2\x99\xA5" || seq == "\xF0\x9F\x92\x95" || seq == "\xF0\x9F\x92\x96" ||
+             seq == "\xF0\x9F\x92\x97" || seq == "\xF0\x9F\x98\x8D" || seq == "\xF0\x9F\xA5\xB0" || seq == "\xF0\x9F\x98\x98") o += "<3";
+    else if (seq == "\xC2\xB0") o += '`';                     // the degree sign
+    // anything else (most emoji) is left out
+  }
+  o.trim();
+  while (o.indexOf("  ") >= 0) o.replace("  ", " ");
+  if (o.length() > 160) o = o.substring(0, 157) + "...";
+  return o;
+}
+
+String shortQuote(const String &t) { return t.length() > 40 ? "\"" + t.substring(0, 37) + "...\"" : "\"" + t + "\""; }
+
+void loadMsgs() {
+  prefs.begin("clock", true);
+  String j = prefs.getString("msgs", "");
+  lastMsgTime = prefs.getUInt("msgtime", 0);
+  hbGlowOn = prefs.getBool("hbglow", true);
+  prefs.end();
+  JsonDocument d;
+  if (j.length() && !deserializeJson(d, j)) {
+    for (JsonObject o : d.as<JsonArray>()) {
+      if (msgCount >= MSG_MAX) break;
+      msgs[msgCount++] = {String((const char *)(o["t"] | "")), o["a"] | 0u, (o["s"] | 0) != 0, (o["h"] | 0) != 0};
+    }
+  }
+  if (unseenCount()) hbUntil = millis() + HEARTBEAT_MS;      // still waiting after a restart: glow again
+}
+void saveMsgs() {                                             // main loop only (it owns "prefs")
+  JsonDocument d;
+  JsonArray a = d.to<JsonArray>();
+  xSemaphoreTake(msgLock, portMAX_DELAY);
+  for (int i = 0; i < msgCount; i++) { JsonObject o = a.add<JsonObject>(); o["t"] = msgs[i].text; o["a"] = msgs[i].at; o["s"] = msgs[i].seen ? 1 : 0; o["h"] = msgs[i].hearted ? 1 : 0; }
+  uint32_t lt = lastMsgTime;
+  xSemaphoreGive(msgLock);
+  String j; serializeJson(d, j);
+  prefs.begin("clock", false); prefs.putString("msgs", j); prefs.putUInt("msgtime", lt); prefs.end();
+}
+
+void addMessage(const String &text, uint32_t at) {
+  xSemaphoreTake(msgLock, portMAX_DELAY);
+  if (msgCount == MSG_MAX) {                                  // full: drop the oldest seen one, else the oldest
+    int drop = 0;
+    for (int i = 0; i < msgCount; i++) if (msgs[i].seen) { drop = i; break; }
+    for (int i = drop; i < msgCount - 1; i++) msgs[i] = msgs[i + 1];
+    msgCount--;
+    if (msgShow == drop) msgShow = -1; else if (msgShow > drop) msgShow--;
+  }
+  msgs[msgCount++] = {text, at, false, false};
+  xSemaphoreGive(msgLock);
+  if (hbGlowOn) hbUntil = millis() + HEARTBEAT_MS;
+  msgDirty = true; msgSaveNeeded = true;
+}
+
+// network task: new messages from <topic>-msg (checked every 30 s)
+void pollMessages() {
+  if (ntfyTopic.isEmpty() || !timeKnown()) return;
+  uint32_t since = lastMsgTime ? lastMsgTime + 1 : (uint32_t)time(nullptr) - 300;
+  WiFiClientSecure c; secureClient(c);
+  HTTPClient http;
+  http.setTimeout(10000);
+  if (!http.begin(c, "https://ntfy.sh/" + ntfyTopic + "-msg/json?poll=1&since=" + String(since))) return;
+  int code = http.GET();
+  String body = code == 200 ? http.getString() : "";
+  http.end();
+  if (code != 200) { Serial.printf("ntfy messages: HTTP %d\n", code); return; }
+  int from = 0;
+  while (from < (int)body.length()) {
+    int nl = body.indexOf('\n', from);
+    if (nl < 0) nl = body.length();
+    String line = body.substring(from, nl);
+    from = nl + 1;
+    JsonDocument d;
+    if (deserializeJson(d, line) || d["event"] != "message") continue;
+    String id = d["id"] | "";
+    if (id.isEmpty() || recentMsgIds.indexOf(id) >= 0) continue;
+    recentMsgIds += id + ","; if (recentMsgIds.length() > 200) recentMsgIds.remove(0, recentMsgIds.indexOf(',', 100) + 1);
+    uint32_t t = d["time"] | 0u;
+    if (t > lastMsgTime) lastMsgTime = t;
+    String text = cleanText(String((const char *)(d["message"] | "")));
+    String title = cleanText(String((const char *)(d["title"] | "")));
+    if (title.length()) text = title + ": " + text;
+    if (text.isEmpty()) continue;
+    Serial.printf("Message: %s\n", text.c_str());
+    addMessage(text, t);
+    notify("Delivered", "On " + String(RECIPIENT) + "'s clock now: " + shortQuote(text), "incoming_envelope", 2);
+  }
+}
+
+void markSeen(int i, const char *how) {
+  if (i < 0 || i >= msgCount || msgs[i].seen) return;
+  msgs[i].seen = true;
+  msgSaveNeeded = true; msgDirty = true;
+  notify("Seen", String(RECIPIENT) + " saw " + shortQuote(msgs[i].text) + how, "eyes", 3);
+  if (!unseenCount()) hbUntil = 0;
+}
+void sendHeart(int i) {
+  if (i < 0 || i >= msgCount) return;
+  heartFlashUntil = millis() + 2500;
+  msgNoteUntil = millis() + 8000;
+  msgDirty = true;
+  if (msgs[i].hearted) return;                                // one heart per message reaches the phone
+  msgs[i].hearted = true; msgSaveNeeded = true;
+  notify(String(RECIPIENT) + " sent a heart back", "In reply to " + shortQuote(msgs[i].text), "heart", 4);
+}
+
+// which message belongs on the screen right now
+void msgPick() {
+  xSemaphoreTake(msgLock, portMAX_DELAY);
+  int want = -1;
+  if (msgShow >= 0 && msgShow < msgCount && (!msgs[msgShow].seen || millis() - msgTouchAt < SEEN_KEEP_MS)) want = msgShow;
+  if (want < 0) for (int i = 0; i < msgCount; i++) if (!msgs[i].seen) { want = i; break; }
+  if (want != msgShow) { msgShow = want; msgDirty = true; }
+  xSemaphoreGive(msgLock);
+}
+
+// gestures while a message is on the screen. true = handled here
+bool msgGesture(int g) {
+  if (msgShow < 0) return false;
+  int i = msgShow;
+  bool firstLook = !msgs[i].seen;
+  msgTouchAt = millis();
+  if (firstLook) markSeen(i, "");
+  if (g == G_TAP) { sendHeart(i); return true; }
+  if (g == G_DOUBLE) {                                        // next unseen message, or back to the clock
+    int next = -1;
+    for (int k = 0; k < msgCount; k++) if (!msgs[k].seen) { next = k; break; }
+    msgShow = next; msgTouchAt = millis(); msgDirty = true;
+    return true;
+  }
+  return firstLook;                                           // first wave just says "seen"; after that, normal
+}
+
+// the message screen (200 x 200)
+void wrapLines(const String &text, const GFXfont *f, int maxW, String *lines, int &n, int maxLines) {
+  n = 0;
+  String cur, word;
+  String t = text + " ";
+  for (int i = 0; i < (int)t.length(); i++) {
+    char ch = t[i];
+    if (ch != ' ') { word += ch; continue; }
+    if (word.isEmpty()) continue;
+    String trial = cur.isEmpty() ? word : cur + " " + word;
+    if (textWidth(trial.c_str(), f) <= maxW) cur = trial;
+    else {
+      if (cur.length()) { if (n < maxLines) lines[n] = cur; n++; }
+      cur = word;
+      while (textWidth(cur.c_str(), f) > maxW && cur.length() > 1) {   // a very long word: break it
+        int k = cur.length() - 1;
+        while (k > 1 && textWidth(cur.substring(0, k).c_str(), f) > maxW) k--;
+        if (n < maxLines) lines[n] = cur.substring(0, k); n++;
+        cur = cur.substring(k);
+      }
+    }
+    word = "";
+  }
+  if (cur.length()) { if (n < maxLines) lines[n] = cur; n++; }
+}
+void drawHeart(int x, int y, int s) {                        // a small filled heart, centre top at (x, y)
+  display.fillCircle(x - s / 2, y, s / 2, GxEPD_BLACK);
+  display.fillCircle(x + s / 2, y, s / 2, GxEPD_BLACK);
+  display.fillTriangle(x - s, y + 1, x + s, y + 1, x, y + s + s / 2, GxEPD_BLACK);
+}
+void drawMsgScreen(bool full) {
+  xSemaphoreTake(msgLock, portMAX_DELAY);
+  if (msgShow < 0 || msgShow >= msgCount) { xSemaphoreGive(msgLock); return; }
+  ClockMsg m = msgs[msgShow];
+  int unseen = unseenCount();
+  xSemaphoreGive(msgLock);
+  struct tm t; char hm[12] = "";
+  if (getLocalTime(&t, 20)) { int h = t.tm_hour % 12; if (h == 0) h = 12; snprintf(hm, sizeof hm, "%d:%02d", h, t.tm_min); }
+  String lines[9]; int n = 0;
+  const GFXfont *f = &Label27;
+  int lh = 30;
+  wrapLines(m.text, f, 184, lines, n, 9);
+  if (n > 4) { f = &Small13; lh = 17; wrapLines(m.text, f, 188, lines, n, 9); }
+  if (n > 8) { n = 8; lines[7] += "..."; }
+  display.setRotation(rotation);
+  if (full) display.setFullWindow(); else display.setPartialWindow(0, 0, display.width(), display.height());
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    drawHeart(16, 14, 8);
+    display.setFont(&Small13);
+    display.setCursor(30, 22);
+    String head = !m.seen ? (unseen > 1 ? String(unseen) + " new messages" : String("New message")) : String("Message");
+    display.print(head);
+    int tw = textWidth(hm, &Small13);
+    display.setCursor(196 - tw, 22); display.print(hm);
+    display.fillRect(4, 32, 192, 2, GxEPD_BLACK);
+    int top = 42, bottom = 168;
+    int blockH = n * lh;
+    int y = top + max(0, (bottom - top - blockH) / 2) + lh - 6;
+    for (int k = 0; k < n; k++) { centerText(lines[k].c_str(), 100, y, f); y += lh; }
+    display.fillRect(4, 172, 192, 1, GxEPD_BLACK);
+    const char *foot = millis() < msgNoteUntil ? "Heart sent  <3" : !m.seen ? "Wave to say you saw it" : "Tap: send a heart   2 taps: close";
+    centerText(foot, 100, 192, &Small13);
+  } while (display.nextPage());
+  display.hibernate();
+}
+
+// heartbeat on the ring: a soft "lub-dub" every 2.4 s, or a pink burst when a heart is sent
+bool msgLedOverride() { return hbActive || millis() < heartFlashUntil; }
+void renderHeartbeat(uint32_t t) {
+  int n = cfg.ledCount;
+  if (millis() < heartFlashUntil) {                         // heart sent: a quick pink bloom from 12 o'clock
+    float u = 1.0f - (heartFlashUntil - millis()) / 2500.0f;
+    memset(px, 0, sizeof px);
+    for (int i = 0; i < n; i++) setPx(i, 255 * (1 - u) + 40 * u, 30, 90 * (1 - u) + 20 * u);
+    blob(ledAt(u * 360), 3.0f, 255, 200, 220);
+    blob(ledAt(-u * 360), 3.0f, 255, 200, 220);
+    return;
+  }
+  float ph = (t % 2400) / 1000.0f;
+  auto pulse = [](float x, float c, float w) { float d = (x - c) / w; return expf(-d * d); };
+  float f = 0.08f + pulse(ph, 0.25f, 0.09f) + 0.6f * pulse(ph, 0.55f, 0.09f);
+  if (f > 1) f = 1;
+  for (int i = 0; i < n; i++) setPx(i, 255 * f, 28 * f, 60 * f);
+}
+
+// ambient light from the gesture sensor (9930): notices the room lights coming on
+int ambientLevel() { int lo = apdsRead(0x94), hi = apdsRead(0x95); return (lo < 0 || hi < 0) ? -1 : (hi << 8) | lo; }
+void msgLoop() {
+  msgPick();
+  if (msgSaveNeeded) { msgSaveNeeded = false; saveMsgs(); }
+  bool allowed = ledsAllowed();
+  static bool wasAllowed = true;
+  if (allowed && !wasAllowed && unseenCount() && hbGlowOn) hbUntil = millis() + HEARTBEAT_MS;    // morning: glow again
+  wasAllowed = allowed;
+  // room lights coming on (only judged while our own ring is dark)
+  static uint32_t lastAmb = 0, darkSince = 0, ringDarkSince = 0;
+  static float amb = -1;
+  if (ledLevel > 0) ringDarkSince = millis();
+  if (apdsOK && !apdsIs9960 && millis() - lastAmb > 2000 && millis() - ringDarkSince > 5000) {
+    lastAmb = millis();
+    int a = ambientLevel();
+    if (a >= 0) {
+      if (amb < 0) amb = a;
+      bool dark = amb < 40;
+      if (dark && darkSince == 0) darkSince = millis();
+      if (!dark) darkSince = 0;
+      if (darkSince && millis() - darkSince > 120000 && a > max(150.0f, amb * 4) && unseenCount() && hbGlowOn) {
+        Serial.println("Room lights came on: showing the heartbeat again");
+        hbUntil = millis() + 10UL * 60 * 1000;
+        darkSince = 0;
+      }
+      amb = amb * 0.8f + a * 0.2f;
+    }
+  }
+  hbActive = hbGlowOn && unseenCount() > 0 && millis() < hbUntil;
+}
+
 void handlePage() {
   server.sendHeader("Cache-Control", "no-store");
   server.send_P(200, "text/html", SETTINGS_PAGE);
@@ -1814,6 +2127,7 @@ void handleState() {
   s["nled"] = cfg.ledCount; s["maxma"] = cfg.maxmA; s["lstart"] = cfg.ledStartHour % 12; s["ldir"] = cfg.ledClockwise ? 1 : 0;
   s["em"] = cfg.effectMask; s["chime"] = cfg.hourChime ? 1 : 0; s["fast"] = (int)fastMs; s["pulse"] = (int)pulseMs;
   s["units"] = useF ? "F" : "C"; s["zip"] = zipCode;
+  s["hbglow"] = hbGlowOn ? 1 : 0;
   s["autoupd"] = autoUpdate ? 1 : 0; s["health"] = healthOn ? 1 : 0; s["otaurl"] = otaBase; s["ntfy"] = ntfyTopic;
 
   JsonObject l = j["live"].to<JsonObject>();
@@ -1860,6 +2174,16 @@ void handleState() {
   }
   String why;
   if (ledsWanted && !ledsAllowed(&why)) l["ledsBlocked"] = why;
+  JsonArray ma = l["msgs"].to<JsonArray>();
+  xSemaphoreTake(msgLock, portMAX_DELAY);
+  for (int i = msgCount - 1; i >= 0; i--) {
+    JsonObject o = ma.add<JsonObject>();
+    o["t"] = msgs[i].text; o["seen"] = msgs[i].seen; o["heart"] = msgs[i].hearted;
+    long ago = timeKnown() && msgs[i].at ? (long)time(nullptr) - (long)msgs[i].at : -1;
+    o["ago"] = ago < 0 ? String("") : ago < 90 ? String("just now") : ago < 5400 ? String(ago / 60) + " min ago" : ago < 129600 ? String(ago / 3600) + " h ago" : String(ago / 86400) + " days ago";
+  }
+  xSemaphoreGive(msgLock);
+  l["amb"] = apdsOK && !apdsIs9960 ? ambientLevel() : -1;
   l["ver"] = fwVersion();
   l["upd"] = otaState == 1 ? String("Checking...") : otaState == 2 ? "Downloading " + String(otaPct) + "%" : otaState == 3 ? String("Restarting...") : otaStatus;
   l["uptime"] = uptimeText();
@@ -1900,6 +2224,7 @@ void handleSet() {
     prefs.begin("clock", false);
     if (k == "fast" && n >= 10 && n <= 62) { fastMs = n; prefs.putUShort("fast", n); }
     else if (k == "pulse" && n >= 3 && n <= 30) { pulseMs = n; prefs.putUChar("pulse", n); }
+    else if (k == "hbglow") { hbGlowOn = n != 0; prefs.putBool("hbglow", hbGlowOn); if (!hbGlowOn) hbUntil = 0; }
     else if (k == "autoupd") { autoUpdate = n != 0; prefs.putBool("autoupd", autoUpdate); }
     else if (k == "health") { healthOn = n != 0; prefs.putBool("health", healthOn); }
     else if (k == "otaurl") {
@@ -1962,6 +2287,15 @@ void handleDo() {
     return;
   }
   else if (a == "update") { wantUpdate = true; msg = "Checking for an update..."; }
+  else if (a == "msgseen") { for (int i = 0; i < msgCount; i++) markSeen(i, " (on the settings page)"); msg = "Marked as seen"; }
+  else if (a == "msgheart") {
+    int i = msgCount - 1;
+    if (i >= 0) { markSeen(i, " (on the settings page)"); sendHeart(i); msg = "Heart sent"; } else msg = "No messages yet";
+  }
+  else if (a == "msgclear") {
+    xSemaphoreTake(msgLock, portMAX_DELAY); msgCount = 0; msgShow = -1; xSemaphoreGive(msgLock);
+    hbUntil = 0; msgSaveNeeded = true; msgDirty = true; msg = "Messages cleared";
+  }
   else if (a == "testmsg") { notify("Test from the clock", statusLine(), "wave", 3); msg = "Test message sent to " + ntfyTopic; }
   else if (a == "forgetwifi") {
     server.send(200, "text/plain", "Restarting into WiFi setup");
@@ -1994,9 +2328,11 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
   delay(500);
-  Serial.println("\nSmart Clock v2 - stage 5");
+  Serial.println("\nSmart Clock v2 - stage 6");
   loadSettings();
   stage5Begin();
+  msgLock = xSemaphoreCreateMutex();
+  loadMsgs();
 
   // where are the hands? RTC memory (exact, survives resets) or flash (last minute-save)
   if (rtcMagic == 0xC10C2026 && (rtcPos ^ 0xA5A5A5A5) == rtcCheck && rtcPos < (uint32_t)CYCLE) {
@@ -2062,11 +2398,18 @@ void loop() {
     if (otaShown && otaState == 0) { otaShown = 0; lastDrawnKey = ""; forceFullNext = true; updateAll(false); }   // install didn't happen: back to the clock
 
     // weather screen for 20 s, then back to the clock screen
-    uint8_t want = millis() < qrUntil ? 2 : millis() < weatherUntil ? 1 : 0;
+    msgLoop();
+    uint8_t want = millis() < qrUntil ? 2 : millis() < weatherUntil ? 1 : msgShow >= 0 ? 3 : 0;
+    static int msgMin = -1;
+    struct tm mt; int curMin = getLocalTime(&mt, 0) ? mt.tm_min : -1;
+    if (want == 3 && overlayShown == 3 && (msgDirty || curMin != msgMin)) {      // message screen: changes + the minute
+      msgDirty = false; msgMin = curMin; drawMsgScreen(false);
+    }
     if (want != overlayShown) {
       overlayShown = want;
       weatherShowing = want != 0;
-      if (want == 1) drawWeather();
+      if (want == 3) { msgDirty = false; msgMin = curMin; drawMsgScreen(true); }
+      else if (want == 1) drawWeather();
       else if (want == 2) {
         String url = "http://" + WiFi.localIP().toString() + "/";
         drawQR("Clock settings", url.c_str(), "Point your phone camera here", WiFi.localIP().toString().c_str(), false);
@@ -3188,6 +3531,11 @@ fieldset{border:0;padding:0;margin:0;min-width:0}
 fieldset[disabled] .card{opacity:.55}
 fieldset[disabled] .card .small{opacity:1}
 .lockcard .row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.msgs{list-style:none;margin:10px 0 0;padding:0}
+.msgs li{padding:10px 0;border-top:1px solid var(--line)}
+.msgs li:first-child{border-top:0}
+.msgs li.new>div:first-child{font-weight:600}
+.msgs li.new>div:first-child::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--acc);margin-right:8px;vertical-align:middle}
 /* bottom sheet */
 .shade{position:fixed;inset:0;background:rgba(20,10,4,.45);display:none;z-index:9}
 .shade.on{display:block}
@@ -3303,6 +3651,18 @@ fieldset[disabled] .card .small{opacity:1}
 
   <!-- ============ CLOCK ============ -->
   <section class="tab" id="t_clock">
+    <div class="card" id="msgCard">
+      <h2>Messages</h2>
+      <div class="small" id="msgEmpty">No messages yet. When one arrives it shows on the clock's screen and the ring glows a soft heartbeat.</div>
+      <ul class="msgs" id="msgList"></ul>
+      <div class="btns hide" id="msgBtns">
+        <button class="btn" onclick="act('msgheart',null,'Heart sent')">Send a heart back</button>
+        <button class="btn ghost" onclick="act('msgseen',null,'Marked as seen')">Mark all as seen</button>
+      </div>
+      <label class="chk" style="margin-top:12px"><input type="checkbox" id="hbglow"> Heartbeat glow for new messages</label>
+      <div class="small" style="margin-top:6px">On the clock: tap to send a heart back, tap twice to close the message.</div>
+    </div>
+
     <div class="card">
       <h2>Clock hands</h2>
       <div class="row"><div class="big" id="handsShow">--:--:--</div><span class="chip" id="handsChip">On time</span></div>
@@ -3399,7 +3759,7 @@ fieldset[disabled] .card .small{opacity:1}
       <h2>Health reports (ntfy)</h2>
       <div class="small">The clock sends a quiet "I'm OK" every 6 hours, and a message after updates, restarts or problems, to the free ntfy app. Subscribe to this topic in the app:</div>
       <div style="margin:8px 0;font-weight:600;word-break:break-all" id="ntfyShow">-</div>
-      <div class="small">To control it from the app, send <b>restart</b>, <b>update</b> or <b>status</b> to the same name with <b>-cmd</b> on the end.</div>
+      <div class="small">To send a message to the clock's screen, publish to the same name with <b>-msg</b> on the end. To control it, send <b>restart</b>, <b>update</b> or <b>status</b> to the name with <b>-cmd</b> on the end.</div>
       <label class="chk" style="margin-top:10px"><input type="checkbox" id="health"> Send health reports</label>
       <div class="btns">
         <a class="btn ghost" id="ntfyLink" href="#" target="_blank" rel="noopener" style="display:flex;align-items:center;justify-content:center;text-decoration:none">Open in ntfy</a>
@@ -3457,6 +3817,7 @@ const $=id=>document.getElementById(id);
 function toast(t){if(!t)return;const e=$('toast');e.textContent=t;e.classList.add('on');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('on'),2200)}
 function hour12(h){return (h%12||12)+(h<12?' AM':' PM')}
 function setv(k,v,msg){S[k]=v;busy=Date.now();fetch('/set?k='+k+'&v='+encodeURIComponent(v)).then(r=>r.text()).then(t=>{toast(msg||t||'Saved');refresh()}).catch(()=>toast('Could not reach the clock'))}
+function esc(t){return String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function act(a,v,msg){fetch('/do?a='+a+(v!=null?'&v='+encodeURIComponent(v):'')).then(r=>r.text()).then(t=>{toast(msg||t);setTimeout(refresh,300)}).catch(()=>toast('Could not reach the clock'))}
 
 // build static pieces
@@ -3479,7 +3840,7 @@ $('emask').onchange=()=>{let m=0;document.querySelectorAll('#emask input').forEa
 $('on').onchange=e=>setv('on',e.target.checked?1:0,e.target.checked?'Light on':'Light off');
 let bt;$('bright').oninput=e=>{clearTimeout(bt);bt=setTimeout(()=>setv('bright',e.target.value,'Brightness set'),250)};
 ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>$(k).onchange=e=>setv(k,e.target.value));
-['night','wake','smir','chime','autoupd','health'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
+['night','wake','smir','chime','autoupd','health','hbglow'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
 $('units').onclick=e=>{const b=e.target.closest('button');if(b)setv('units',b.dataset.v)};
 
 // tabs
@@ -3514,7 +3875,7 @@ function paint(){
   document.querySelector('.dot.custom').classList.toggle('sel',!matched);
   if(Date.now()-busy>1500){$('bright').value=S.bright;}
   ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
-  ['night','wake','smir','chime','autoupd','health'].forEach(k=>$(k).checked=!!S[k]);
+  ['night','wake','smir','chime','autoupd','health','hbglow'].forEach(k=>$(k).checked=!!S[k]);
   $('nightTimes').classList.toggle('hide',!S.night);
   if(S.g)S.g.forEach((a,i)=>$('gp'+i).textContent=ACTIONS[a]);
   document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('sel',b.dataset.v===S.units));
@@ -3538,6 +3899,8 @@ function live(){
   $('srotBox').classList.toggle('hide',!swipes);$('smirBox').classList.toggle('hide',!swipes);
   $('gLearn').classList.toggle('hide',L.gready!==false);
   $('gIntro').textContent=swipes?'Swipe or tap over the little window just below the clock hands, a few centimetres away.':'Bring your hand toward the little window just below the clock hands, a few centimetres away, then take it away again. Tap, tap twice, or hold your hand there.';$('place').textContent=L.place||'';
+  const ms=L.msgs||[];$('msgEmpty').classList.toggle('hide',ms.length>0);$('msgBtns').classList.toggle('hide',!ms.length);
+  $('msgList').innerHTML=ms.map(m=>`<li class="${m.seen?'':'new'}"><div>${esc(m.t)}</div><div class="small">${m.ago}${m.seen?' · seen':' · new'}${m.heart?' · heart sent':''}</div></li>`).join('');
   $('ver').textContent=L.ver||'-';$('uptime').textContent=L.uptime||'-';$('upd').textContent=L.upd||'-';
   if(S.ntfy){$('ntfyShow').textContent=S.ntfy;$('ntfyLink').href='https://ntfy.sh/'+S.ntfy;}
   ['otaurl','ntfy'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});

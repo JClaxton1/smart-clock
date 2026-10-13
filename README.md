@@ -11,6 +11,10 @@ The clock checks the published page by itself and installs new versions at night
 
 If a new version doesn't start properly, the clock goes back to the previous version by itself and sends you a message.
 
+## Sending a message to the clock
+In the ntfy app, subscribe to the clock's topic name with `-msg` on the end, and send a message there.
+It appears on the clock's screen within about 30 seconds. You'll get **Delivered**, **Seen**, and (if she taps) a **heart** back on the main topic.
+
 ## What's here
 | Folder | What it is |
 |---|---|

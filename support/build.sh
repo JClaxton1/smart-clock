@@ -17,7 +17,9 @@ for f in drop/*.ino; do
   if [ "$t" -ge "$newest_t" ]; then newest="$f"; newest_t="$t"; fi
 done
 [ -n "$newest" ] || { echo "No .ino file in drop/"; exit 1; }
-echo "Building $newest as version 5.$BUILD"
+SERIES=$(grep -oE "#define FW_SERIES [0-9]+" "$newest" | grep -oE "[0-9]+$" || echo 5)
+VER="$SERIES.$BUILD"
+echo "Building $newest as version $VER"
 
 # 2. sketch folder: the .ino + support files + build_info.h (version and update address)
 rm -rf work out _site
@@ -40,7 +42,7 @@ SHA=$(sha256sum "$APP" | cut -d' ' -f1)
 # 4. what the clock downloads
 cp "$APP" "_site/firmware/app-$BUILD.bin"
 cat > _site/firmware/manifest.json <<JSON
-{"build": $BUILD, "version": "5.$BUILD", "bin": "firmware/app-$BUILD.bin", "size": $SIZE, "sha256": "$SHA",
+{"build": $BUILD, "version": "$VER", "bin": "firmware/app-$BUILD.bin", "size": $SIZE, "sha256": "$SHA",
  "built": "$(date -u +%Y-%m-%dT%H:%MZ)", "source": "$(basename "$newest")"}
 JSON
 
@@ -53,7 +55,7 @@ cp out/smart_clock.ino.partitions.bin _site/install/partitions.bin
 cp "$BOOT_APP0" _site/install/boot_app0.bin
 cp "$APP" _site/install/app.bin
 cat > _site/install/manifest.json <<JSON
-{"name": "Smart Clock", "version": "5.$BUILD", "new_install_prompt_erase": true,
+{"name": "Smart Clock", "version": "$VER", "new_install_prompt_erase": true,
  "builds": [{"chipFamily": "ESP32-C6", "parts": [
    {"path": "bootloader.bin", "offset": 0},
    {"path": "partitions.bin", "offset": 32768},
@@ -63,4 +65,4 @@ JSON
 
 # 6. the web page
 cp -r site/. _site/
-echo "Done: 5.$BUILD, $SIZE bytes, sha256 $SHA"
+echo "Done: $VER, $SIZE bytes, sha256 $SHA"
