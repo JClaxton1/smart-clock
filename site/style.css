@@ -1,0 +1,176 @@
+/* Amanda's Clock — the page is the wall the clock hangs on.
+   Plaster greys from the photos, walnut ink, the red of the second hand for links,
+   and the amber halo only where the light actually is. */
+:root {
+  --dusk: #463b31;        /* the wall at night, sampled from the glowing photo */
+  --day-wall: #a59d92;    /* the same wall by daylight */
+  --plaster: #dcd5cb;     /* reading background */
+  --plaster-deep: #cfc6ba;
+  --walnut: #2e211a;      /* text */
+  --walnut-soft: #5b4a3e;
+  --teak: #a8703f;
+  --second: #a3242c;      /* the second hand */
+  --halo: #f4a340;
+  --measure: 64ch;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --display: "Bricolage Grotesque", "Atkinson Hyperlegible", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--plaster);
+  color: var(--walnut);
+  font: 18px/1.6 var(--body);
+}
+img { max-width: 100%; height: auto; display: block; }
+a { color: var(--second); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+a:hover { text-decoration-thickness: 2.5px; }
+:focus-visible { outline: 3px solid var(--halo); outline-offset: 3px; border-radius: 4px; }
+
+/* ---------- top bar ---------- */
+.bar {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  max-width: 1080px; margin: 0 auto; padding: 18px 16px;
+}
+.bar .home { font: 700 20px/1 var(--display); color: inherit; text-decoration: none; letter-spacing: -.01em; }
+.bar nav { display: flex; gap: 20px; flex-wrap: wrap; }
+.bar nav a { color: inherit; text-decoration: none; font-size: 16px; padding: 4px 0; border-bottom: 2px solid transparent; }
+.bar nav a:hover, .bar nav a[aria-current="page"] { border-bottom-color: var(--second); }
+.on-dusk { color: #efe6db; }
+
+/* ---------- home hero: the room goes dark, the ring lights up ---------- */
+.hero {
+  background: var(--dusk);
+  color: #f3e9dd;
+  animation: dusk 2.4s ease-in-out .9s both;
+}
+@keyframes dusk { from { background: var(--day-wall); } to { background: var(--dusk); } }
+.hero .bar { animation: barInk 2.4s ease-in-out .9s both; }
+@keyframes barInk { from { color: var(--walnut); } to { color: #efe6db; } }
+.stage {
+  position: relative; max-width: 1080px; margin: 0 auto; aspect-ratio: 1024 / 572;
+  -webkit-mask: radial-gradient(ellipse closest-side at 50% 50%, #000 62%, transparent 100%);
+          mask: radial-gradient(ellipse closest-side at 50% 50%, #000 62%, transparent 100%);
+}
+.stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.stage .glow { animation: lightOn 2.4s ease-in-out .9s both; }
+@keyframes lightOn { from { opacity: 0; } to { opacity: 1; } }
+.hero-text { max-width: 760px; margin: 0 auto; padding: 8px 16px 72px; text-align: center; }
+.hero h1 {
+  font: 800 clamp(48px, 10vw, 104px)/.95 var(--display);
+  letter-spacing: -.035em; margin: 0 0 18px;
+  color: #fbefe0;
+  text-shadow: 0 0 40px rgba(244, 163, 64, .35);
+}
+.hero p { font-size: clamp(18px, 2.4vw, 22px); margin: 0 auto; max-width: 34ch; color: #e6d8c8; }
+@media (prefers-reduced-motion: reduce) {
+  .hero, .hero .bar, .stage .glow { animation: none; }
+}
+
+/* ---------- reading sections ---------- */
+main.read { padding: 8px 0 72px; }
+.col { max-width: calc(var(--measure) + 32px); margin: 0 auto; padding: 0 16px; }
+.wide { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+h1.page {
+  font: 800 clamp(40px, 7vw, 68px)/1 var(--display); letter-spacing: -.03em; margin: 40px 0 16px;
+}
+.lede { font-size: 21px; color: var(--walnut-soft); margin: 0 0 40px; max-width: 46ch; }
+h2 {
+  font: 700 clamp(26px, 3.6vw, 34px)/1.15 var(--display); letter-spacing: -.02em;
+  margin: 56px 0 12px;
+}
+h3 { font: 700 20px/1.3 var(--display); margin: 28px 0 6px; }
+p { margin: 0 0 14px; }
+.muted { color: var(--walnut-soft); }
+
+/* what it does: two columns of plain statements, a short teak rule on each */
+.does { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 28px 40px; margin: 24px 0 0; padding: 0; list-style: none; }
+.does li { border-top: 3px solid var(--teak); padding-top: 12px; }
+.does b { display: block; font: 700 20px/1.3 var(--display); margin-bottom: 4px; }
+
+/* light styles: a ring swatch per style, like the tiles on the settings page */
+.styles { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 22px 16px; margin: 24px 0 0; padding: 0; list-style: none; }
+.styles li { text-align: center; font-size: 16px; }
+.ring {
+  width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 8px;
+  -webkit-mask: radial-gradient(circle, transparent 24px, #000 25px);
+          mask: radial-gradient(circle, transparent 24px, #000 25px);
+  background: var(--c, #ff8c3c);
+}
+.r-breathe { opacity: .75; }
+.r-rainbow { background: conic-gradient(red, orange, yellow, lime, cyan, blue, magenta, red); }
+.r-markers { background: conic-gradient(from -8deg, #ff8c3c 0 16deg, #ff8c3c33 16deg 112deg, #fff 112deg 124deg, #ff8c3c33 124deg); }
+.r-comet { background: conic-gradient(transparent 0 200deg, #ff8c3c); }
+.r-twinkle { background: radial-gradient(circle at 20% 30%, #fff 0 4px, transparent 5px), radial-gradient(circle at 78% 22%, #ff8c3c 0 4px, transparent 5px), radial-gradient(circle at 80% 76%, #fff 0 4px, transparent 5px), radial-gradient(circle at 24% 80%, #ff8c3c 0 4px, transparent 5px), #ff8c3c33; }
+.r-ferris { background: conic-gradient(#ff3a2a 0 12deg, #3a1d0a 12deg 30deg, #ffbe14 30deg 42deg, #3a1d0a 42deg 60deg, #2878ff 60deg 72deg, #3a1d0a 72deg 90deg, #28dc5a 90deg 102deg, #3a1d0a 102deg 120deg, #ff46b4 120deg 132deg, #3a1d0a 132deg 150deg, #ff7814 150deg 162deg, #3a1d0a 162deg 180deg, #ff3a2a 180deg 192deg, #3a1d0a 192deg 210deg, #ffbe14 210deg 222deg, #3a1d0a 222deg 240deg, #2878ff 240deg 252deg, #3a1d0a 252deg 270deg, #28dc5a 270deg 282deg, #3a1d0a 282deg 300deg, #ff46b4 300deg 312deg, #3a1d0a 312deg 330deg, #ff7814 330deg 342deg, #3a1d0a 342deg); }
+.r-orbit { background: conic-gradient(#ff8c3c1a 0 250deg, #ff8c3c 340deg, #fff 352deg, #ff8c3c1a 356deg); }
+.r-ocean { background: conic-gradient(#0a2f78, #13a0a0, #0a3c8c, #2ab4b4, #0a2f78, #1890a8, #0a2f78); }
+.r-aurora { background: conic-gradient(#20e070, #18b4a0, #7a4ad0, #28d080, #1aa8b0, #9a50d8, #20e070); }
+.r-candle { background: conic-gradient(#ff6a10, #ff9a2a, #e25008, #ff8a1c, #ff6a10); }
+.r-weather { background: conic-gradient(#3c6eff, #78c8ff, #ffbe3c, #ff6e14, #ffbe3c, #78c8ff, #3c6eff); }
+
+/* figures */
+figure { margin: 32px 0; }
+figure img { border-radius: 6px; }
+figcaption { font-size: 15px; color: var(--walnut-soft); margin-top: 8px; }
+
+/* onward links at the bottom of the home page */
+.onward { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 32px 0 0; }
+.onward a {
+  display: block; padding: 22px 22px 20px; background: var(--plaster-deep); color: var(--walnut);
+  text-decoration: none; border-radius: 4px; border-left: 4px solid var(--second);
+}
+.onward a b { display: block; font: 700 22px/1.2 var(--display); margin-bottom: 4px; }
+.onward a span { color: var(--walnut-soft); font-size: 16px; }
+.onward a:hover { background: #c6bcaf; }
+
+/* guide: gesture table */
+.gestures { width: 100%; border-collapse: collapse; margin: 16px 0 8px; font-size: 17px; }
+.gestures th, .gestures td { text-align: left; padding: 12px 10px 12px 0; border-bottom: 1px solid #b9afa3; vertical-align: top; }
+.gestures th { font-weight: 700; }
+.gestures td:first-child { font-weight: 700; white-space: nowrap; }
+.tip { background: var(--plaster-deep); padding: 14px 16px; border-radius: 4px; margin: 18px 0; font-size: 17px; }
+dl.fix { margin: 12px 0 0; }
+dl.fix dt { font-weight: 700; margin-top: 18px; }
+dl.fix dd { margin: 4px 0 0; }
+
+/* story: a real timeline, so it's numbered; the rail is the red second hand */
+.timeline { list-style: none; margin: 24px 0 0; padding: 0; counter-reset: step; }
+.timeline > li { position: relative; padding: 0 0 28px 44px; border-left: 2px solid var(--second); margin-left: 12px; counter-increment: step; }
+.timeline > li:last-child { border-left-color: transparent; }
+.timeline > li::before {
+  content: counter(step); position: absolute; left: -14px; top: -2px; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--plaster); border: 2px solid var(--second); color: var(--second);
+  font: 700 14px/22px var(--body); text-align: center;
+}
+.timeline h3 { margin: 0 0 4px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin: 20px 0 0; padding: 0; list-style: none; }
+.facts li { background: var(--plaster-deep); padding: 14px; border-radius: 4px; font-size: 16px; }
+.facts b { display: block; font: 700 26px/1.1 var(--display); }
+
+/* install */
+esp-web-install-button button, .button {
+  font: 700 17px var(--body); background: var(--walnut); color: #f6ece0; border: 0; border-radius: 6px;
+  padding: 13px 20px; cursor: pointer;
+}
+esp-web-install-button button:hover, .button:hover { background: #46332a; }
+code { background: var(--plaster-deep); padding: 1px 6px; border-radius: 4px; font-size: .92em; }
+
+footer { border-top: 1px solid #c3b9ad; padding: 22px 16px 40px; text-align: center; font-size: 15px; color: var(--walnut-soft); }
+
+/* photo pairs inside the story; portrait phone photos sit side by side */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 8px; }
+.pair figure, .timeline figure { margin: 0; }
+.timeline figure.single { margin: 16px 0 8px; max-width: 360px; }
+.pair img, .timeline figure img { width: 100%; aspect-ratio: 3 / 4; object-fit: cover; border-radius: 4px; }
+.pair figcaption, .timeline figcaption { font-size: 14px; margin-top: 6px; }
+.running { margin: 40px auto 0; max-width: 360px; }
+.running video { width: 100%; border-radius: 6px; display: block; background: var(--plaster-deep); }
+
+/* phones: crop the hero photo square so the clock fills the width */
+@media (max-width: 640px) {
+  .stage { aspect-ratio: 1 / 1; }
+  .stage img { object-position: 50% 50%; }
+}

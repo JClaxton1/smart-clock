@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clock software · Amanda's Clock</title>
+<meta name="description" content="Install or repair the software on Amanda's Clock with a USB cable.">
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../style.css">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+</head>
+<body>
+<header class="bar">
+  <a class="home" href="../">Amanda's Clock</a>
+  <nav aria-label="Pages"><a href="../guide/">How to use it</a><a href="../story/">How it was made</a></nav>
+</header>
+
+<main class="read">
+<div class="col">
+  <h1 class="page">Clock software</h1>
+  <p class="lede">The clock checks this page by itself and installs new versions at night. You only need this page to set up a new clock or repair one that won't start.</p>
+
+  <h2 id="ver">Latest version</h2>
+  <p class="muted" id="built">Checking…</p>
+  <p>To install the newest version straight away: on the clock's settings page, open <b>Setup</b>, then <b>Check for updates now</b>.</p>
+
+  <h2>Install with a USB cable</h2>
+  <ol>
+    <li>Use <b>Chrome or Edge on a computer</b>. Phones and Safari can't do this.</li>
+    <li>Plug the clock into the computer with a USB-C data cable.</li>
+    <li>Press the button below, pick the port that appears (usually "USB JTAG/serial debug unit"), then <b>Install</b>.</li>
+    <li>When it asks about erasing, leave <b>Erase device</b> unticked. The clock then keeps its WiFi, screen direction, light settings and hand position.</li>
+  </ol>
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate">Connect and install</button>
+    <span slot="unsupported">This browser can't talk to USB devices. Open this page in Chrome or Edge on a computer.</span>
+    <span slot="not-allowed">This page needs to be opened over https.</span>
+  </esp-web-install-button>
+  <p class="tip">If the clock isn't found, hold its <b>BOOT</b> button while plugging it in, then try again.</p>
+</div>
+</main>
+
+<footer>Made by hand, for Amanda.</footer>
+<script>
+fetch('../firmware/manifest.json', {cache: 'no-store'}).then(r => r.json()).then(m => {
+  document.getElementById('ver').textContent = 'Version ' + m.version;
+  document.getElementById('built').textContent = m.built ? 'Published ' + new Date(m.built).toLocaleString() + '.' : '';
+}).catch(() => { document.getElementById('built').textContent = 'No version has been published yet.'; });
+</script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How to use it · Amanda's Clock</title>
+<meta name="description" content="How to use Amanda's Clock: gestures, the settings page, the light, the screen, and what to do if something looks wrong.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="bar">
+  <a class="home" href="../">Amanda's Clock</a>
+  <nav aria-label="Pages"><a href="./" aria-current="page">How to use it</a><a href="../story/">How it was made</a></nav>
+</header>
+
+<main class="read">
+<div class="col">
+  <h1 class="page">How to use it</h1>
+  <p class="lede">Everything works with a wave of your hand or from your phone. Nothing here can break it.</p>
+
+  <h2>Waving at it</h2>
+  <p>There's a small window in the wood just below the hands. Bring your hand toward it, a few centimetres away, then take it away again. You don't need to touch anything.</p>
+  <table class="gestures">
+    <thead><tr><th scope="col">Do this</th><th scope="col">And it will</th></tr></thead>
+    <tbody>
+      <tr><td>Tap</td><td>Turn the light on or off. A single tap takes about a second to register, because the clock waits to see if a second tap is coming.</td></tr>
+      <tr><td>Tap twice</td><td>Switch to the next light style.</td></tr>
+      <tr><td>Hold 2 seconds</td><td>Show today's weather on the little screen for 20 seconds.</td></tr>
+      <tr><td>Hold 5 seconds</td><td>Show a code on the screen for opening the settings page on your phone.</td></tr>
+    </tbody>
+  </table>
+  <p class="tip">For a few seconds each minute a clock hand passes right over the window, and the clock can't see your hand through it. If a wave doesn't work, wait a moment and try again. After the clock restarts it spends about a minute learning where its hands pass, so gestures start working after that.</p>
+  <p>You can change what each gesture does on the <b>Gestures</b> tab of the settings page.</p>
+
+  <h2>The settings page</h2>
+  <p>Hold your hand over the window for 5 seconds. A square code appears on the little screen. Point your phone's camera at it and tap the link that pops up. The code also shows for the first minute after the clock starts. Your phone has to be on the same WiFi as the clock.</p>
+  <p>Changes save as you make them. There are four tabs:</p>
+  <h3>Light</h3>
+  <p>Turn the ring on or off, choose a style and a colour, set the brightness, and choose how long it stays on before turning itself off. <b>Quiet at night</b> keeps it dark between the times you pick. <b>Hour chime</b> sends a little sparkle round the ring on the hour while the light is on.</p>
+  <h3>Gestures</h3>
+  <p>Shows the last thing the clock saw, so you can practise. Tap a gesture to change what it does.</p>
+  <h3>Clock</h3>
+  <p>Shows what the hands should say and whether they're on time. If they ever look wrong, use <b>Hands showing the wrong time?</b> and tell it what they show. It works out the rest.</p>
+  <h3>Setup</h3>
+  <p>Things that were set when the clock was made. They're locked so nothing changes by accident. Tap <b>Unlock</b> to change them; they lock again when you leave the tab.</p>
+
+  <h2>The little screen</h2>
+  <p>The time, the date, and the temperature and humidity in the room. It's e-paper, like an e-reader, so it uses no power to keep showing a picture and a short flicker once an hour is normal. You can switch between °F and °C on the Clock tab.</p>
+
+  <h2>Power</h2>
+  <p>Keep the clock plugged in with its USB cable. If the power goes out, a battery inside keeps the hands moving. If the battery starts getting low, the light stops first so the hands can keep going, and it comes back when the power does. If the battery runs very low, the hands park and the screen asks for the cable; once it's plugged in again they catch up by themselves.</p>
+
+  <h2>New software</h2>
+  <p>Now and then the clock gets new software over WiFi, around 3 in the morning. You don't need to do anything. If a new version ever misbehaves, the clock goes back to the previous one by itself.</p>
+
+  <h2>If something looks wrong</h2>
+  <dl class="fix">
+    <dt>The hands show the wrong time</dt>
+    <dd>Right after a power cut they may be catching up or waiting for the real time to catch up with them; give it a few minutes. If they're still wrong, open the Clock tab and use <b>Hands showing the wrong time?</b></dd>
+    <dt>The light doesn't answer a wave</dt>
+    <dd>Wait a minute if the clock just restarted. Bring your hand closer, about 3 to 5 centimetres from the window, and avoid the moment a hand is passing over it. If it's night, check <b>Quiet at night</b> on the Light tab.</dd>
+    <dt>The settings page won't open</dt>
+    <dd>Make sure your phone is on the home WiFi, not mobile data. Then hold a hand over the window for 5 seconds for a fresh code.</dd>
+    <dt>The WiFi name or password changed</dt>
+    <dd>Setup tab → <b>Forget WiFi and set up again</b>. The screen then shows a code to join a network called <b>SmartClock-Setup</b>; join it and choose the new WiFi. If you can't reach the settings page any more, unplug the clock for a few seconds and plug it back in: when it can't find its WiFi, it shows the setup code by itself.</dd>
+    <dt>Anything else</dt>
+    <dd>Setup tab → <b>Restart the clock</b>. It takes about 30 seconds, and the hands keep their place.</dd>
+  </dl>
+</div>
+</main>
+
+<footer>Made by hand, for Amanda.</footer>
+</body>
+</html>

@@ -3,64 +3,73 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Smart Clock</title>
-<meta name="description" content="Software home for the Floating Numerals smart clock.">
+<title>Amanda's Clock</title>
+<meta name="description" content="A handmade wall clock with real sweeping hands, a light ring that answers a wave, and a little screen for the date, the room and the weather.">
+<meta property="og:title" content="Amanda's Clock">
+<meta property="og:description" content="A handmade wall clock that lights up when you wave at it.">
+<meta property="og:image" content="img/clock-glow-1024.jpg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
-<style>
-:root{--bg:#f6efe6;--card:#fffaf4;--ink:#2a1d14;--mut:#7a6656;--line:#e8dccd;--acc:#a8622e;--accInk:#fff8f0;--good:#3f7d4f;--warn:#b26a12}
-@media (prefers-color-scheme:dark){:root{--bg:#1a130e;--card:#261c15;--ink:#f3e7da;--mut:#b29e8b;--line:#3a2c22;--acc:#e0a46a;--accInk:#21170f;--good:#7cc08b;--warn:#e9a54a}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 Inter,system-ui,sans-serif}
-main{max-width:640px;margin:0 auto;padding:40px 16px 64px}
-h1{font-size:34px;line-height:1.15;margin:0 0 6px;letter-spacing:-.02em}
-.sub{color:var(--mut);margin:0 0 28px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;margin:0 0 16px}
-h2{font-size:18px;margin:0 0 8px}
-.ver{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.ver b{font-size:28px}
-.small{color:var(--mut);font-size:14px}
-ol{padding-left:20px;margin:8px 0 16px}
-li{margin:4px 0}
-esp-web-install-button button,.btn{font:600 16px Inter,system-ui,sans-serif;background:var(--acc);color:var(--accInk);border:0;border-radius:12px;padding:12px 18px;cursor:pointer}
-.note{border-left:3px solid var(--warn);padding:2px 0 2px 12px;color:var(--mut);font-size:14px;margin-top:14px}
-code{background:var(--line);padding:1px 6px;border-radius:6px;font-size:14px}
-a{color:var(--acc)}
-</style>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
-<main>
-  <h1>Smart Clock</h1>
-  <p class="sub">The software home of the Floating Numerals clock. The clock checks this page for new versions on its own.</p>
 
-  <div class="card">
-    <h2>Latest software</h2>
-    <div class="ver"><b id="v">…</b><span class="small" id="built"></span></div>
-    <p class="small" style="margin:8px 0 0">Clocks install new versions at night, around 3 AM. To install straight away, press <b>Check for updates now</b> on the clock's Setup tab, or send <code>update</code> to the clock's ntfy command topic.</p>
+<header class="hero">
+  <div class="bar">
+    <a class="home" href="./">Amanda's Clock</a>
+    <nav aria-label="Pages"><a href="guide/">How to use it</a><a href="story/">How it was made</a></nav>
   </div>
+  <div class="stage">
+    <img src="img/clock-day-1024.jpg" srcset="img/clock-day-640.jpg 640w, img/clock-day-1024.jpg 1024w" sizes="(max-width: 1080px) 100vw, 1080px" alt="" aria-hidden="true">
+    <img class="glow" src="img/clock-glow-1024.jpg" srcset="img/clock-glow-640.jpg 640w, img/clock-glow-1024.jpg 1024w" sizes="(max-width: 1080px) 100vw, 1080px"
+         alt="A round wooden clock on a plaster wall. Twelve round number badges float on a dark ring, and a warm amber light glows from behind the ring onto the wall.">
+  </div>
+  <div class="hero-text">
+    <h1>Amanda's Clock</h1>
+    <p>Real hands that sweep, a ring of light that answers a wave, and a little screen that knows the weather.</p>
+  </div>
+</header>
 
-  <div class="card">
-    <h2>Install with a USB cable</h2>
-    <p class="small" style="margin-top:0">Only needed the first time, or to repair a clock that won't start. Updates after that arrive over WiFi.</p>
-    <ol>
-      <li>Use <b>Chrome or Edge on a computer</b> (phones and Safari can't do this).</li>
-      <li>Plug the clock into the computer with a USB-C data cable.</li>
-      <li>Press the button, pick the port that appears (usually "USB JTAG/serial debug unit"), then <b>Install</b>.</li>
-    </ol>
-    <esp-web-install-button manifest="install/manifest.json">
-      <button slot="activate">Connect and install</button>
-      <span slot="unsupported">This browser can't talk to USB devices. Please open this page in Chrome or Edge on a computer.</span>
-      <span slot="not-allowed">Please open this page over https.</span>
-    </esp-web-install-button>
-    <p class="note">When it asks about erasing, leave <b>Erase device</b> unticked: the clock then keeps its WiFi, screen direction, light settings and hand position. If the clock isn't found, hold its <b>BOOT</b> button while plugging it in, then try again.</p>
+<main class="read">
+  <div class="wide">
+    <h2>What it does</h2>
+    <ul class="does">
+      <li><b>Keeps perfect time by itself</b>It sets its own hands from the internet, handles daylight saving, and catches up on its own after a power cut.</li>
+      <li><b>Lights up when you wave</b>Bring a hand toward the little window under the hands and the ring glows. It turns itself off again after a while.</li>
+      <li><b>Shows the day at a glance</b>The small screen shows the time, the date, and how warm and humid the room is. Hold a hand there for the weather outside.</li>
+      <li><b>Changes its mood</b>Twelve light styles, any colour you like, and a quiet setting so it stays dark while you sleep.</li>
+      <li><b>Looks after itself</b>New software arrives by itself at night. If anything ever goes wrong it puts itself back the way it was.</li>
+      <li><b>Keeps going in a power cut</b>A battery inside keeps the hands moving when it's unplugged, and saves the light for when the power is back.</li>
+    </ul>
+
+    <h2>Twelve ways to glow</h2>
+    <p class="muted">Tap twice to move to the next one, or pick one on the settings page.</p>
+    <ul class="styles">
+      <li><div class="ring"></div>Warm glow</li>
+      <li><div class="ring r-breathe"></div>Breathing</li>
+      <li><div class="ring r-rainbow"></div>Rainbow</li>
+      <li><div class="ring r-markers"></div>Hour markers</li>
+      <li><div class="ring r-comet"></div>Comet</li>
+      <li><div class="ring r-twinkle"></div>Twinkle</li>
+      <li><div class="ring r-ferris"></div>Ferris wheel</li>
+      <li><div class="ring r-orbit"></div>Second-hand orbit</li>
+      <li><div class="ring r-ocean"></div>Ocean</li>
+      <li><div class="ring r-aurora"></div>Aurora</li>
+      <li><div class="ring r-candle"></div>Candle</li>
+      <li><div class="ring r-weather"></div>Weather colours</li>
+    </ul>
+
+    <div class="onward">
+      <a href="guide/"><b>How to use it</b><span>Waves and taps, the settings page, and what to do if something looks wrong.</span></a>
+      <a href="story/"><b>How it was made</b><span>From a sketch to a clock on the wall: printing, wiring, and the software.</span></a>
+    </div>
   </div>
 </main>
+
+<footer><p>Made by hand, for Amanda.</p><p><a href="install/">Clock software</a> <span id="ver"></span></p></footer>
 <script>
-fetch('firmware/manifest.json',{cache:'no-store'}).then(r=>r.json()).then(m=>{
-  document.getElementById('v').textContent='Version '+m.version;
-  if(m.built)document.getElementById('built').textContent='built '+new Date(m.built).toLocaleString();
-}).catch(()=>{document.getElementById('v').textContent='Not built yet'});
+fetch('firmware/manifest.json',{cache:'no-store'}).then(r=>r.json()).then(m=>{document.getElementById('ver').textContent='(version '+m.version+')'}).catch(()=>{});
 </script>
 </body>
 </html>

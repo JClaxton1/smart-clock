@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>How it was made · Amanda's Clock</title>
+<meta name="description" content="How Amanda's Clock was made: the design, the 3D-printed face, the light ring, the electronics and the software.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<header class="bar">
+  <a class="home" href="../">Amanda's Clock</a>
+  <nav aria-label="Pages"><a href="../guide/">How to use it</a><a href="./" aria-current="page">How it was made</a></nav>
+</header>
+
+<main class="read">
+<div class="col">
+  <h1 class="page">How it was made</h1>
+  <p class="lede">A 12-inch clock, designed and printed at home, wired by hand, and taught a few tricks along the way.</p>
+
+  <figure>
+    <img src="../img/clock-day-1024.jpg" srcset="../img/clock-day-640.jpg 640w, ../img/clock-day-1024.jpg 1024w" sizes="(max-width: 700px) 100vw, 680px"
+         alt="The clock design by daylight: a dark ring with twelve round teak number badges, four spokes, a wooden centre disc and a small screen below it.">
+    <figcaption>The design concept: floating numbers on a ring, teak and walnut.</figcaption>
+  </figure>
+
+  <ul class="facts">
+    <li><b>12 in</b>across the face</li>
+    <li><b>121</b>lights in the ring</li>
+    <li><b>12</b>light styles</li>
+    <li><b>3000 mAh</b>battery inside</li>
+  </ul>
+
+  <h2>From idea to wall</h2>
+  <ol class="timeline">
+    <li>
+      <h3>Choosing a look</h3>
+      <p>Six designs made it to the drawing board: minimalist, classic Roman, mid-century sunburst, hexagon, steampunk gear, and floating numbers. The floating numbers won: twelve round badges sitting on an open ring, so the wall shows through.</p>
+    </li>
+    <li>
+      <h3>Printing the face</h3>
+      <p>The face is 3D-printed in two wood-coloured materials, teak and walnut. A centre cross with four spokes holds everything together, the ring comes in four arcs pinned together, and every number is raised on its own badge.</p>
+      <div class="pair"><figure><img src="../img/back-wide-700.jpg" srcset="../img/back-wide-700.jpg 700w, ../img/back-wide-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="The back of the printed face: four ring arcs, number badges, four spokes and the centre disc, with wires running down the bottom spoke."><figcaption>The back of the face, before the pod went on.</figcaption></figure><figure><img src="../img/back-open-700.jpg" srcset="../img/back-open-700.jpg 700w, ../img/back-open-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="Close-up of the back of the face with the pod lifted aside and coloured wires running to the screen badge."><figcaption>Wires for the screen, light and sensor run down the bottom spoke.</figcaption></figure></div>
+    </li>
+    <li>
+      <h3>A pod for the electronics</h3>
+      <p>Everything clever lives in a round pod behind the centre: the main board, the battery, and the plugs for the screen, the lights and the sensor. The pod was made deeper twice before all the wiring fitted comfortably.</p>
+      <div class="pair"><figure><img src="../img/pod-wiring-700.jpg" srcset="../img/pod-wiring-700.jpg 700w, ../img/pod-wiring-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="A small blue power-meter board wired with yellow, blue, red and black wires, held over the open brown pod with the computer board inside."><figcaption>The power meter that keeps an eye on the battery.</figcaption></figure><figure><img src="../img/temp-sensor-700.jpg" srcset="../img/temp-sensor-700.jpg 700w, ../img/temp-sensor-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="A tiny purple temperature and humidity sensor board with four pins."><figcaption>The room temperature and humidity sensor.</figcaption></figure></div>
+    </li>
+    <li>
+      <h3>The light ring</h3>
+      <p>A strip of tiny colour lights, cut to 121, runs around a thin wall behind the ring. They shine outwards onto the wall, which is what makes the glow. Their brightness is capped so they stay cool and safe.</p>
+    </li>
+    <li>
+      <h3>Wiring the brain</h3>
+      <p>A thumb-sized computer with WiFi sits on a hand-soldered board, with plug-in sockets so every part can be swapped. Bring-up had its moments: a computer with a dead pin, a screen missing one power wire, and a light strip whose data wire had snapped inside its plug.</p>
+      <div class="pair"><figure><img src="../img/brain-battery-700.jpg" srcset="../img/brain-battery-700.jpg 700w, ../img/brain-battery-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="The thumb-sized computer board held in a clamp, with red and black battery wires soldered to its underside."><figcaption>Battery wires on the underside of the computer.</figcaption></figure><figure><img src="../img/brain-wired-700.jpg" srcset="../img/brain-wired-700.jpg 700w, ../img/brain-wired-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="The computer board with several coloured wires soldered to its pins."><figcaption>Every part gets its own wire.</figcaption></figure></div>
+    </li>
+    <li>
+      <h3>Teaching it to tell time</h3>
+      <p>The hands are a quartz sweep movement driven directly, sixteen tiny steps a second. The clock remembers exactly where its hands are, even through a restart, and walks them forward or waits whenever they need to catch up with the real time.</p>
+      <div class="pair"><figure><img src="../img/movement-coil-700.jpg" srcset="../img/movement-coil-700.jpg 700w, ../img/movement-coil-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="An opened quartz clock movement showing its copper coil and white plastic gear frame."><figcaption>Inside the movement: the coil the clock pulses directly.</figcaption></figure><figure><img src="../img/movement-gears-700.jpg" srcset="../img/movement-gears-700.jpg 700w, ../img/movement-gears-1200.jpg 1200w" sizes="(max-width: 700px) 46vw, 330px" loading="lazy" alt="Close-up of the white plastic gears beside the copper coil."><figcaption>The gears that turn sixteen pulses into one second.</figcaption></figure></div>
+    </li>
+    <li>
+      <h3>Teaching it to see a wave</h3>
+      <p>A small infrared sensor behind the window measures how close something is. The trickiest part: the clock's own second hand passes right over that window every minute and kept "waving" at it. Now the clock learns where its hands pass and only answers to people.</p>
+      <figure class="single"><img src="../img/sensor-700.jpg" srcset="../img/sensor-700.jpg 700w, ../img/sensor-1200.jpg 1200w" sizes="360px" loading="lazy" alt="A small purple sensor board with pins labelled VL, GND, VCC, SCL, SDA and INT."><figcaption>The gesture sensor. It only came to life after a tiny power jumper on its back was bridged.</figcaption></figure>
+    </li>
+    <li>
+      <h3>Looking after itself</h3>
+      <p>New software is built online and published here. The clock fetches it at night, checks it, and keeps it only if it runs well; otherwise it puts the old version back on its own. Every few hours it also sends a quiet "I'm OK" message.</p>
+    </li>
+  </ol>
+
+  <figure class="running">
+    <video src="../img/finished-running.mp4" poster="../img/finished-running.jpg" autoplay muted loop playsinline aria-label="The finished clock lying on a dresser, its light ring glowing blue and the little screen showing 11:41."></video>
+    <figcaption>First light: the finished clock running, ring on and screen showing the time.</figcaption>
+  </figure>
+</div>
+</main>
+
+<footer>Made by hand, for Amanda.</footer>
+<script>
+if (matchMedia('(prefers-reduced-motion: reduce)').matches) document.querySelectorAll('video').forEach(v => { v.removeAttribute('autoplay'); v.pause(); v.controls = true; });
+</script>
+</body>
+</html>
