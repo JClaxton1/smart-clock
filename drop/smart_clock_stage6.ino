@@ -62,6 +62,7 @@ bool msgGesture(int g);
 bool msgLedOverride();
 void renderHeartbeat(uint32_t t);
 extern volatile uint32_t heartFlashUntil;
+extern volatile bool remoteClear;
 void addMessage(const String &text, uint32_t at);
 String cleanText(const String &in);
 void pollMessages();
@@ -740,6 +741,8 @@ void updateMapBase() {
   std::nth_element(tmp, tmp + BG_BINS / 3, tmp + BG_BINS);   // a third of the way up: clear dial, not the hand passes
   mapBase = tmp[BG_BINS / 3];
 }
+// a parked clock hand covers the window so completely there's no room left to see a person
+bool sensorBlocked() { return apdsOK && !apdsIs9960 && bgReady && mapBase + bgOff + marginFor() > 1023; }
 bool binHigh(int b) { b = (b + BG_BINS) % BG_BINS; return bgMap[b] > mapBase + marginFor() * 0.7f; }
 int poll9930() {
   static uint32_t t0 = 0, lastNearEnd = 0, nearN = 0, nearHigh = 0;
@@ -1559,10 +1562,12 @@ void handleRemote(String cmd) {
   } else if (cmd == "update") {
     notify("Checking for an update", "Asked from ntfy.", "mag", 2);
     wantUpdate = true;
+  } else if (cmd == "clear") {
+    remoteClear = true;
   } else if (cmd == "status" || cmd == "ping") {
     notify("Clock status", statusLine(), "white_check_mark", 3);
   } else {
-    notify("Commands", "Send one word to " + ntfyTopic + "-cmd:\nrestart  - restart the clock\nupdate  - install new software now\nstatus  - this report", "information_source", 2);
+    notify("Commands", "Send one word to " + ntfyTopic + "-cmd:\nrestart  - restart the clock\nupdate  - install new software now\nstatus  - this report\nclear  - stop the heartbeat and clear messages from the screen", "information_source", 2);
   }
 }
 void pollCommands() {
@@ -1829,6 +1834,7 @@ uint32_t msgTouchAt = 0;                               // last gesture on the me
 uint32_t msgNoteUntil = 0;                             // "Heart sent" line shown until
 volatile bool msgDirty = false, msgSaveNeeded = false;
 volatile uint32_t hbUntil = 0;                         // heartbeat glow runs until (millis)
+volatile bool remoteClear = false;                     // "clear" sent to <topic>-cmd
 volatile uint32_t heartFlashUntil = 0;                 // pink "heart sent" burst until (millis)
 volatile bool hbActive = false;                        // read by the LED task
 bool hbGlowOn = true;                                  // setting: heartbeat glow for new messages
@@ -2103,7 +2109,22 @@ void msgLoop() {
       amb = amb * 0.8f + a * 0.2f;
     }
   }
-  hbActive = hbGlowOn && unseenCount() > 0 && millis() < hbUntil;
+  // while a clock hand covers the window she can't wave back, so the heartbeat waits and the
+  // time it waited is added on afterwards
+  static uint32_t lastTick = millis();
+  uint32_t nowMs = millis();
+  bool blocked = sensorBlocked();
+  if (blocked && hbUntil > nowMs) hbUntil += nowMs - lastTick;
+  lastTick = nowMs;
+  if (remoteClear) {                                          // sender cleared it: no "Seen" receipts
+    remoteClear = false;
+    xSemaphoreTake(msgLock, portMAX_DELAY);
+    for (int i = 0; i < msgCount; i++) msgs[i].seen = true;
+    xSemaphoreGive(msgLock);
+    hbUntil = 0; msgShow = -1; msgDirty = true; msgSaveNeeded = true;
+    notify("Cleared", "Messages on the clock were cleared from ntfy.", "broom", 2);
+  }
+  hbActive = hbGlowOn && unseenCount() > 0 && nowMs < hbUntil && !blocked;
 }
 
 void handlePage() {
@@ -2184,6 +2205,7 @@ void handleState() {
   }
   xSemaphoreGive(msgLock);
   l["amb"] = apdsOK && !apdsIs9960 ? ambientLevel() : -1;
+  l["gblock"] = sensorBlocked();
   l["ver"] = fwVersion();
   l["upd"] = otaState == 1 ? String("Checking...") : otaState == 2 ? "Downloading " + String(otaPct) + "%" : otaState == 3 ? String("Restarting...") : otaStatus;
   l["uptime"] = uptimeText();
@@ -3632,6 +3654,7 @@ fieldset[disabled] .card .small{opacity:1}
     <div class="card">
       <div class="big">Wave to control</div>
       <div class="small" style="margin-top:4px" id="gIntro">Bring your hand toward the little window just below the clock hands, a few centimetres away, then take it away again.</div>
+      <div class="small hide" id="gBlock" style="margin-top:8px;color:var(--warn)">A clock hand is covering the sensor window right now, so waves can't be seen. It will work again once the hand moves on.</div>
       <div class="small hide" id="gLearn" style="margin-top:8px;color:var(--warn)">Just started: the clock is learning where its hands pass the sensor. Gestures work again in about a minute.</div>
       <div class="seen" id="seenBox"><div><div class="small">Last thing the clock saw</div><b id="seen">Nothing yet</b></div></div>
     </div>
@@ -3723,6 +3746,7 @@ fieldset[disabled] .card .small{opacity:1}
       <label class="chk" id="smirBox"><input type="checkbox" id="smir"> Left and right are swapped</label>
       <div class="small">Sensor: <b id="sensor">-</b></div>
       <div class="small">Hand distance right now: <b id="prox">-</b> (with no hand: about <span id="proxBase">-</span>)</div>
+      <div class="small">Room light: <b id="amb">-</b></div>
     </div>
 
     <div class="card">
@@ -3897,7 +3921,8 @@ function live(){
   const sup=L.gestures||[];const swipes=sup.indexOf(0)>=0;
   document.querySelectorAll('#glist li').forEach(li=>li.classList.toggle('hide',sup.indexOf(+li.dataset.i)<0));
   $('srotBox').classList.toggle('hide',!swipes);$('smirBox').classList.toggle('hide',!swipes);
-  $('gLearn').classList.toggle('hide',L.gready!==false);
+  $('gLearn').classList.toggle('hide',L.gready!==false);$('gBlock').classList.toggle('hide',!L.gblock);
+  $('amb').textContent=L.amb!=null&&L.amb>=0?L.amb:'-';
   $('gIntro').textContent=swipes?'Swipe or tap over the little window just below the clock hands, a few centimetres away.':'Bring your hand toward the little window just below the clock hands, a few centimetres away, then take it away again. Tap, tap twice, or hold your hand there.';$('place').textContent=L.place||'';
   const ms=L.msgs||[];$('msgEmpty').classList.toggle('hide',ms.length>0);$('msgBtns').classList.toggle('hide',!ms.length);
   $('msgList').innerHTML=ms.map(m=>`<li class="${m.seen?'':'new'}"><div>${esc(m.t)}</div><div class="small">${m.ago}${m.seen?' · seen':' · new'}${m.heart?' · heart sent':''}</div></li>`).join('');

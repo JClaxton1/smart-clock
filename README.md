@@ -13,7 +13,7 @@ If a new version doesn't start properly, the clock goes back to the previous ver
 
 ## Sending a message to the clock
 In the ntfy app, subscribe to the clock's topic name with `-msg` on the end, and send a message there.
-It appears on the clock's screen within about 30 seconds. You'll get **Delivered**, **Seen**, and (if she taps) a **heart** back on the main topic.
+It appears on the clock's screen within about 30 seconds. To stop the heartbeat and clear messages from your end, send `clear` to the `-cmd` topic. You'll get **Delivered**, **Seen**, and (if she taps) a **heart** back on the main topic.
 
 ## What's here
 | Folder | What it is |
