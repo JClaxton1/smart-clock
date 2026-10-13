@@ -2,7 +2,9 @@
 # Builds the newest sketch in drop/ and lays out the website in _site/.
 # Used by .github/workflows/build.yml (you never need to run it yourself).
 set -euo pipefail
-BUILD="${BUILD_NUMBER:?}"                       # GitHub's run number -> software version 5.<BUILD>
+# Version number = how many commits have changed the firmware, so website-only changes
+# don't make the clock reinstall the same software. (5.<BUILD>)
+BUILD="${BUILD_NUMBER:-$(git rev-list --count HEAD -- drop support/clock_support.h support/partitions.csv)}"
 BASE="${PAGES_URL:?}"; BASE="${BASE%/}"          # e.g. https://yourname.github.io/smart-clock
 FQBN="${FQBN:-esp32:esp32:XIAO_ESP32C6}"
 ACLI="${ACLI:-arduino-cli}"

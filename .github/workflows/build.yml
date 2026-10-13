@@ -20,6 +20,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.ver.outputs.changed }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,10 +43,18 @@ jobs:
 
       - name: Build
         env:
-          BUILD_NUMBER: ${{ github.run_number }}
           PAGES_URL: ${{ steps.pages.outputs.base_url }}
           ARDUINO_DATA: /home/runner/.arduino15
         run: bash support/build.sh
+
+      - name: Is this a new clock version?
+        id: ver
+        run: |
+          new=$(python3 -c "import json;print(json.load(open('_site/firmware/manifest.json'))['build'])")
+          old=$(curl -s "${{ steps.pages.outputs.base_url }}/firmware/manifest.json" | python3 -c "import json,sys;print(json.load(sys.stdin)['build'])" 2>/dev/null || echo 0)
+          echo "version=5.$new" >> "$GITHUB_OUTPUT"
+          if [ "$new" != "$old" ]; then echo "changed=yes" >> "$GITHUB_OUTPUT"; else echo "changed=no" >> "$GITHUB_OUTPUT"; fi
+          echo "Live: 5.$old  This build: 5.$new"
 
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -62,8 +73,8 @@ jobs:
         uses: actions/deploy-pages@v4
 
       - name: Tell your phone
-        if: ${{ env.NTFY != '' }}
+        if: ${{ env.NTFY != '' && needs.build.outputs.changed == 'yes' }}
         run: |
           curl -s -H "Title: New clock software published" -H "Tags: package" \
-            -d "Version 5.${{ github.run_number }} is ready. The clock installs it tonight around 3 AM. To install now, send: update  to ${NTFY}-cmd" \
+            -d "Version ${{ needs.build.outputs.version }} is ready. The clock installs it tonight around 3 AM. To install now, send: update  to ${NTFY}-cmd" \
             "https://ntfy.sh/${NTFY}" > /dev/null
