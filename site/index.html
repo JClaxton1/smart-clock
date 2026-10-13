@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Clock</title>
+<meta name="description" content="Software home for the Floating Numerals smart clock.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+<style>
+:root{--bg:#f6efe6;--card:#fffaf4;--ink:#2a1d14;--mut:#7a6656;--line:#e8dccd;--acc:#a8622e;--accInk:#fff8f0;--good:#3f7d4f;--warn:#b26a12}
+@media (prefers-color-scheme:dark){:root{--bg:#1a130e;--card:#261c15;--ink:#f3e7da;--mut:#b29e8b;--line:#3a2c22;--acc:#e0a46a;--accInk:#21170f;--good:#7cc08b;--warn:#e9a54a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 Inter,system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:40px 16px 64px}
+h1{font-size:34px;line-height:1.15;margin:0 0 6px;letter-spacing:-.02em}
+.sub{color:var(--mut);margin:0 0 28px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;margin:0 0 16px}
+h2{font-size:18px;margin:0 0 8px}
+.ver{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.ver b{font-size:28px}
+.small{color:var(--mut);font-size:14px}
+ol{padding-left:20px;margin:8px 0 16px}
+li{margin:4px 0}
+esp-web-install-button button,.btn{font:600 16px Inter,system-ui,sans-serif;background:var(--acc);color:var(--accInk);border:0;border-radius:12px;padding:12px 18px;cursor:pointer}
+.note{border-left:3px solid var(--warn);padding:2px 0 2px 12px;color:var(--mut);font-size:14px;margin-top:14px}
+code{background:var(--line);padding:1px 6px;border-radius:6px;font-size:14px}
+a{color:var(--acc)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Smart Clock</h1>
+  <p class="sub">The software home of the Floating Numerals clock. The clock checks this page for new versions on its own.</p>
+
+  <div class="card">
+    <h2>Latest software</h2>
+    <div class="ver"><b id="v">…</b><span class="small" id="built"></span></div>
+    <p class="small" style="margin:8px 0 0">Clocks install new versions at night, around 3 AM. To install straight away, press <b>Check for updates now</b> on the clock's Setup tab, or send <code>update</code> to the clock's ntfy command topic.</p>
+  </div>
+
+  <div class="card">
+    <h2>Install with a USB cable</h2>
+    <p class="small" style="margin-top:0">Only needed the first time, or to repair a clock that won't start. Updates after that arrive over WiFi.</p>
+    <ol>
+      <li>Use <b>Chrome or Edge on a computer</b> (phones and Safari can't do this).</li>
+      <li>Plug the clock into the computer with a USB-C data cable.</li>
+      <li>Press the button, pick the port that appears (usually "USB JTAG/serial debug unit"), then <b>Install</b>.</li>
+    </ol>
+    <esp-web-install-button manifest="install/manifest.json">
+      <button slot="activate">Connect and install</button>
+      <span slot="unsupported">This browser can't talk to USB devices. Please open this page in Chrome or Edge on a computer.</span>
+      <span slot="not-allowed">Please open this page over https.</span>
+    </esp-web-install-button>
+    <p class="note">The clock's saved settings (WiFi, light colours, hand position) are kept. If the clock isn't found, hold its <b>BOOT</b> button while plugging it in, then try again.</p>
+  </div>
+</main>
+<script>
+fetch('firmware/manifest.json',{cache:'no-store'}).then(r=>r.json()).then(m=>{
+  document.getElementById('v').textContent='Version '+m.version;
+  if(m.built)document.getElementById('built').textContent='built '+new Date(m.built).toLocaleString();
+}).catch(()=>{document.getElementById('v').textContent='Not built yet'});
+</script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# Every 6 hours: has the clock sent its "I'm OK" report recently? If not, warn your phone once.
+# Needs the repository secret NTFY_TOPIC (the topic name shown on the clock's Setup tab).
+name: Clock health check
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write                 # only used to keep this schedule from being switched off
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      NTFY: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - name: Has the clock checked in?
+        if: ${{ env.NTFY != '' }}
+        run: |
+          msgs=$(curl -s "https://ntfy.sh/${NTFY}/json?poll=1&since=12h")
+          if echo "$msgs" | grep -q '"heartbeat"'; then echo "The clock checked in. All good."; exit 0; fi
+          if echo "$msgs" | grep -q '"no_heartbeat"'; then echo "Already warned."; exit 0; fi
+          curl -s -H "Title: Clock hasn't checked in" -H "Tags: warning,no_heartbeat" -H "Priority: 4" \
+            -d "No health report from the clock for over 12 hours. It may be unplugged, its WiFi may have changed, or the internet is down at its home." \
+            "https://ntfy.sh/${NTFY}" > /dev/null
+          echo "Warning sent."
+
+      # GitHub pauses scheduled jobs in repositories with no activity for 60 days.
+      # An empty commit every 45 days keeps this check running (it doesn't trigger a build).
+      - uses: actions/checkout@v4
+      - name: Keep the schedule alive
+        run: |
+          last=$(git log -1 --format=%ct); now=$(date +%s)
+          if [ $(( (now - last) / 86400 )) -ge 45 ]; then
+            git config user.name "clock-health-bot"
+            git config user.email "clock-health-bot@users.noreply.github.com"
+            git commit --allow-empty -m "Keep the clock health check running"
+            git push
+          fi
