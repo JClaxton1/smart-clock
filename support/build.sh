@@ -51,7 +51,7 @@ cp out/smart_clock.ino.partitions.bin _site/install/partitions.bin
 cp "$BOOT_APP0" _site/install/boot_app0.bin
 cp "$APP" _site/install/app.bin
 cat > _site/install/manifest.json <<JSON
-{"name": "Smart Clock", "version": "5.$BUILD", "new_install_prompt_erase": false,
+{"name": "Smart Clock", "version": "5.$BUILD", "new_install_prompt_erase": true,
  "builds": [{"chipFamily": "ESP32-C6", "parts": [
    {"path": "bootloader.bin", "offset": 0},
    {"path": "partitions.bin", "offset": 32768},

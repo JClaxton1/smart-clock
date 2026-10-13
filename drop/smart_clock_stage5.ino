@@ -735,18 +735,22 @@ int poll9930() {
   lastProximity = p;
   uint32_t now = millis();
   int b = bgBin();
-  if (!bgReady) {                                  // learn one full sweep of the second hand first
+  // Each half-second of the second hand's lap is learned on its own the first time the hand goes
+  // through it (at any speed - also while the hands are catching up or after they were paused).
+  // Until a spot is learned, nothing that happens there counts as a gesture.
+  if (bgSeen[b] < 20) {
     bgMap[b] += (p - bgMap[b]) * 0.3f;
-    if (bgSeen[b] < 1000) bgSeen[b]++;
+    bgSeen[b]++;
     proxRef = (uint16_t)bgMap[b];
-    bool all = true;
-    for (int i = 0; i < BG_BINS; i++) if (bgSeen[i] < 5) { all = false; break; }
-    if ((all && now - bgStart > 62000) || now - bgStart > 180000) {
-      bgReady = true; updateMapBase();
-      Serial.printf("Gesture sensor: learned the hands, gestures on (clear-dial level %.0f)\n", mapBase);
+    if (handNear) { handNear = false; lastNearEnd = now; }          // a gesture can't straddle an unlearned spot
+    if (!bgReady) {
+      bool all = true;
+      for (int i = 0; i < BG_BINS; i++) if (bgSeen[i] < 20) { all = false; break; }
+      if (all) { bgReady = true; updateMapBase(); Serial.printf("Gesture sensor: learned the hands (clear-dial level %.0f)\n", mapBase); }
     }
     return -1;
   }
+  if (!bgReady && now - bgStart > 62000) { bgReady = true; updateMapBase(); }   // hands paused: the learned part is enough
   static uint32_t lastBase = 0;
   if (!handNear && now - lastBase > 10000) { lastBase = now; updateMapBase(); }
   float ref = max(bgMap[b], max(bgMap[(b + 1) % BG_BINS], bgMap[(b + BG_BINS - 1) % BG_BINS])) + bgOff;
@@ -779,10 +783,10 @@ int poll9930() {
     handNear = false; lastNearEnd = now;
     bool repeat = false;
     for (int i = 0; i < BG_BINS; i++)
-      if (binTouched[i] && binPrevTouch[i] && binTouch[i] - binPrevTouch[i] >= 55000 && binTouch[i] - binPrevTouch[i] <= 65000) repeat = true;
+      if (binTouched[i] && binPrevTouch[i] && binTouch[i] - binPrevTouch[i] >= 40000 && binTouch[i] - binPrevTouch[i] <= 130000) repeat = true;
     if (repeat) {
       for (int i = 0; i < BG_BINS; i++) if (binTouched[i]) bgMap[i] = max(bgMap[i], (float)binNearMax[i]);
-      Serial.printf("[gesture] same spot as a minute ago - that's a clock hand (second %d), learned and ignored\n", b / 2);
+      Serial.printf("[gesture] same spot as last lap - that's a clock hand (second %d), learned and ignored\n", b / 2);
       return -1;
     }
     if (nearHigh * 2 > nearN) { Serial.printf("[gesture] a clock hand is over the window (second %d) - ignored\n", b / 2); return -1; }
