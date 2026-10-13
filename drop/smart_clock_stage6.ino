@@ -1826,7 +1826,7 @@ void stage5Loop() {
 const char *RECIPIENT = "Amanda";
 const int MSG_MAX = 5;
 const uint32_t HEARTBEAT_MS = 30UL * 60 * 1000;        // glow for 30 minutes after a message arrives
-const uint32_t SEEN_KEEP_MS = 10UL * 60 * 1000;        // a seen message stays up 10 minutes after the last wave
+const uint32_t SEEN_KEEP_MS = 60UL * 1000;             // a seen message stays up 1 minute after the last wave, then the clock comes back
 ClockMsg msgs[MSG_MAX];
 int msgCount = 0;                                      // oldest first
 int msgShow = -1;                                      // message on the screen, -1 = none
