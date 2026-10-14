@@ -4024,6 +4024,7 @@ fieldset[disabled] .card .small{opacity:1}
         <button class="btn" onclick="act('msgheart',null,'Heart sent')">Send a heart back</button>
         <button class="btn ghost" onclick="act('msgseen',null,'Marked as seen')">Mark all as seen</button>
       </div>
+      <button class="btn ghost hide" id="msgClear" style="margin-top:10px;color:var(--warn);border-color:var(--warn)" onclick="clearMsgs()">Clear messages</button>
       <label class="chk" style="margin-top:12px"><input type="checkbox" id="hbglow"> Heartbeat glow for new messages</label>
       <div class="small" style="margin-top:6px">On the clock: tap to send a heart back, tap twice to close the message.</div>
     </div>
@@ -4207,6 +4208,7 @@ function setv(k,v,msg){S[k]=v;busy=Date.now();fetch('/set?k='+k+'&v='+encodeURIC
 (function(){const n=['S','M','T','W','T','F','S'];$('remDays').innerHTML=n.map((d,i)=>`<label class="day"><input type="checkbox" data-b="${i}">${d}</label>`).join('');
  const t=new Date();t.setDate(t.getDate()+1);$('remDate').value=t.toISOString().slice(0,10);
  $('remRep').onchange=()=>{const v=$('remRep').value;$('remDateBox').classList.toggle('hide',v!=='0');$('remDaysBox').classList.toggle('hide',v!=='pick')};})();
+function clearMsgs(){if(confirm('Clear all messages from the clock?\n\nThis takes them off the screen and out of this list. It can\'t be undone.'))act('msgclear',null,'Messages cleared')}
 function addRem(){let d=$('remRep').value;if(d==='pick'){d=0;document.querySelectorAll('#remDays input').forEach(c=>{if(c.checked)d|=1<<c.dataset.b});if(!d){toast('Pick at least one day');return}}
  const q='op=add&label='+encodeURIComponent($('remLabel').value)+'&time='+encodeURIComponent($('remTime').value)+'&days='+d+'&date='+encodeURIComponent($('remDate').value);
  fetch('/rem?'+q).then(r=>r.text()).then(t=>{toast(t);$('remLabel').value='';$('remAdd').open=false;setTimeout(refresh,300)}).catch(()=>toast('Could not reach the clock'))}
@@ -4294,7 +4296,7 @@ function live(){
   $('gLearn').classList.toggle('hide',L.gready!==false);$('gBlock').classList.toggle('hide',!L.gblock);
   $('amb').textContent=L.amb!=null&&L.amb>=0?L.amb:'-';
   $('gIntro').textContent=swipes?'Swipe or tap over the little window just below the clock hands, a few centimetres away.':'Bring your hand toward the little window just below the clock hands, a few centimetres away, then take it away again. Tap, tap twice, or hold your hand there.';$('place').textContent=L.place||'';
-  const ms=L.msgs||[];$('msgEmpty').classList.toggle('hide',ms.length>0);$('msgBtns').classList.toggle('hide',!ms.length);
+  const ms=L.msgs||[];$('msgEmpty').classList.toggle('hide',ms.length>0);$('msgBtns').classList.toggle('hide',!ms.length);$('msgClear').classList.toggle('hide',!ms.length);
   $('msgList').innerHTML=ms.map(m=>`<li class="${m.seen?'':'new'}"><div>${esc(m.t)}</div><div class="small">${m.ago}${m.seen?' · seen':' · new'}${m.heart?' · heart sent':''}</div></li>`).join('');
   const rs=S.rem||[];$('remEmpty').classList.toggle('hide',rs.length>0);
   $('remList').innerHTML=rs.map((r,i)=>`<li class="rem"><div class="remrow"><div><div>${esc(r.l)}</div><div class="small">${esc(r.when)}${r.on?'':' · off'}</div></div><div class="rembtns"><button class="btn ghost sm" onclick="remOp('toggle',${i})">${r.on?'Turn off':'Turn on'}</button><button class="btn ghost sm" onclick="remOp('del',${i})">Delete</button></div></div></li>`).join('');
