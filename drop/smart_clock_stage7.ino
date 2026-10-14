@@ -235,6 +235,18 @@ int16_t inaRead(uint8_t reg) {
 float batteryVolts() { return (uint16_t)inaRead(0x02) * 0.00125f; }
 float batteryMilliamps() { return inaRead(0x01) * 0.0025f / 0.1f; }
 
+// What the battery is doing, worked out every 10 s by battUpdate() (main loop).
+// On USB the clock itself runs from USB, so with the light off the battery current is
+// only charging (minus) or nothing (full). Unplugged, the clock draws from the battery (plus).
+// The light ring always runs from the battery side, so while it's lit a plus current
+// doesn't prove the cable is out: the last answer from a dark moment is kept.
+enum BattState : uint8_t { BS_NONE, BS_CHARGING, BS_FULL, BS_BATTERY };
+volatile uint8_t battState = BS_NONE;
+float battPct = -1;                            // smoothed charge estimate, 0..100 (-1 = not known yet)
+float battMaAvg = 0;                           // smoothed current, + = battery running the clock
+float battMaSlow = 0;                          // slower average, for "hours left"
+const float BATT_MAH = 3000;
+
 // =====================================================================
 //  LIGHT + GESTURE SETTINGS (saved together as one block in flash)
 // =====================================================================
@@ -1076,6 +1088,16 @@ void drawMain(bool full) {
     display.fillRect(14, 42, 172, 2, GxEPD_BLACK);
     centerText(hm, 100, 128, &BigTime);
     display.fillRect(14, 142, 172, 2, GxEPD_BLACK);
+    int bp = battState == BS_BATTERY ? battPctShown() : -1;
+    if (bp >= 0) {                                     // unplugged: a little battery with its charge replaces "INSIDE"
+      char pt[6]; snprintf(pt, sizeof pt, "%d%%", bp);
+      int x0 = 52 - (24 + textWidth(pt, &Small13)) / 2, y0 = 152;
+      display.drawRect(x0, y0, 20, 10, GxEPD_BLACK);
+      display.fillRect(x0 + 20, y0 + 3, 2, 4, GxEPD_BLACK);
+      int w = (16 * bp + 50) / 100;
+      if (w > 0) display.fillRect(x0 + 2, y0 + 2, w, 6, GxEPD_BLACK);
+      display.setFont(&Small13); display.setCursor(x0 + 26, 162); display.print(pt);
+    } else
     centerText("INSIDE", 52, 162, &Small13);
     if (rainSoon) {                                    // rain warning takes the humidity corner
       char rh[10] = "SOON";
@@ -1195,8 +1217,8 @@ void updateAll(bool forceFull) {
   if (weatherShowing) { lastDraw = millis(); return; }
   struct tm tm; char key[64];
   bool ht = getLocalTime(&tm, 50);
-  snprintf(key, sizeof key, "%d|%d|%d|%d|%.0f|%.0f|%d|%d", rainSoon ? rainHour + 100 : 0, ht ? tm.tm_yday : -1, ht ? tm.tm_hour : -1, ht ? tm.tm_min : -1,
-           isnan(roomC) ? -99.0f : (useF ? roomC * 9 / 5 + 32 : roomC), roomRH, rotation, useF);
+  snprintf(key, sizeof key, "%d|%d|%d|%d|%.0f|%.0f|%d|%d|%d", rainSoon ? rainHour + 100 : 0, ht ? tm.tm_yday : -1, ht ? tm.tm_hour : -1, ht ? tm.tm_min : -1,
+           isnan(roomC) ? -99.0f : (useF ? roomC * 9 / 5 + 32 : roomC), roomRH, rotation, useF, battState == BS_BATTERY ? battPctShown() : -1);
   if (forceFull || lastDrawnKey != key) {
     // a full (flashing) refresh once an hour clears e-paper ghosting; every other minute is a quiet partial refresh
     static int lastFullHour = -1;
@@ -1547,6 +1569,69 @@ void notify(const String &title, const String &body, const String &tags = "", in
   nqCount++;
   xSemaphoreGive(nqLock);
 }
+// ---------- battery level and power ----------
+// resting LiPo voltage -> charge (typical curve); 3.45 V is where the hands park, so that's 0 %
+float lipoPercent(float v) {
+  static const float V[] = {3.45f, 3.68f, 3.74f, 3.77f, 3.79f, 3.82f, 3.87f, 3.92f, 4.00f, 4.08f, 4.18f};
+  if (v <= V[0]) return 0;
+  for (int i = 1; i < 11; i++)
+    if (v < V[i]) return (i - 1) * 10 + (v - V[i - 1]) / (V[i] - V[i - 1]) * 10;
+  return 100;
+}
+
+void battUpdate(float v, float mA) {
+  if (!(v > 2.5f)) { battState = BS_NONE; return; }            // no battery sensor / battery unplugged
+  static bool first = true;
+  battMaAvg = first ? mA : battMaAvg + (mA - battMaAvg) * 0.3f;
+  uint8_t s = battState;
+  if (battMaAvg < -8) s = BS_CHARGING;
+  else if (!ledsPowered || s == BS_NONE) s = battMaAvg > 10 ? BS_BATTERY : (battMaAvg < -2 ? BS_CHARGING : BS_FULL);
+  else if (battMaAvg > 10 && s == BS_CHARGING) s = BS_FULL;     // light on while plugged in: the ring outdraws the charger
+  // charge estimate from the resting voltage: allow for the sag under load (about 0.2 ohm in the path)
+  float vRest = v + mA / 1000.0f * 0.2f - (s == BS_CHARGING ? 0.05f : 0);
+  float p = lipoPercent(vRest);
+  if (s == BS_FULL && !ledsPowered && v >= 4.1f) p = 100;
+  battPct = (battPct < 0) ? p : battPct + (p - battPct) * 0.15f;
+  if (s == BS_BATTERY) battMaSlow = battMaSlow <= 0 ? battMaAvg : battMaSlow + (battMaAvg - battMaSlow) * 0.03f;
+  // tell the phone about a power cut (after 2 minutes on battery) and when the power comes back
+  static uint32_t onBattSince = 0;
+  static bool told = false;
+  if (s == BS_BATTERY) {
+    if (!onBattSince) onBattSince = millis();
+    if (!told && !first && millis() - onBattSince > 120000) {
+      told = true;
+      notify("Clock on battery", "The clock is unplugged or the power is out. Battery " + String((int)(battPct + 0.5f)) + "%.", "battery", 3);
+    }
+  } else {
+    onBattSince = 0;
+    if (told) { told = false; notify("Clock power back", "The clock is plugged in again and charging.", "electric_plug", 2); }
+  }
+  if (s != battState) Serial.printf("Battery: %s (%.2f V, %.0f mA)\n", s == BS_CHARGING ? "charging" : s == BS_FULL ? "plugged in" : "on battery", v, mA);
+  battState = s;
+  first = false;
+}
+
+int battPctShown() { return battPct < 0 ? -1 : constrain((int)((battPct + 2.5f) / 5) * 5, 0, 100); }   // steps of 5 %
+
+String battText() {
+  int p = battPctShown();
+  switch (battState) {
+    case BS_CHARGING: return p >= 95 ? "Charging · almost full" : "Charging · about " + String(p) + "%";
+    case BS_FULL:     return p >= 95 ? "Plugged in · full" : "Plugged in · " + String(p) + "%";
+    case BS_BATTERY: {
+      String s = "On battery · " + String(p) + "%";
+      if (battMaSlow > 3) {
+        float h = battPct / 100.0f * BATT_MAH * 0.9f / battMaSlow;
+        if (h < 1) s += " · under an hour left";
+        else if (h < 48) s += " · about " + String((int)(h + 0.5f)) + " h left";
+        else s += " · about " + String((int)(h / 24 + 0.5f)) + " days left";
+      }
+      return s;
+    }
+  }
+  return "";
+}
+
 bool sendNtfy(const NtfyMsg &m) {
   if (ntfyTopic.isEmpty() || WiFi.status() != WL_CONNECTED) return false;
   WiFiClientSecure c; secureClient(c);
@@ -1565,7 +1650,7 @@ bool sendNtfy(const NtfyMsg &m) {
 String statusLine() {
   String s = "Software " + fwVersion() + " | up " + uptimeText();
   if (WiFi.status() == WL_CONNECTED) s += " | WiFi " + String(WiFi.RSSI()) + " dBm";
-  if (!isnan(battV) && battV > 2.5f) s += " | battery " + String(battV, 2) + " V";
+  if (!isnan(battV) && battV > 2.5f) s += " | battery " + String(battV, 2) + " V" + (battState != BS_NONE ? " (" + battText() + ")" : "");
   if (!isnan(roomC)) s += " | inside " + String(useF ? roomC * 9 / 5 + 32 : roomC, 0) + (useF ? "F" : "C");
   s += " | hands " + handTimeText(handPos);
   if (handsHold) s += " (paused)";
@@ -2520,6 +2605,11 @@ void handleState() {
   l["ver"] = fwVersion();
   l["upd"] = otaState == 1 ? String("Checking...") : otaState == 2 ? "Downloading " + String(otaPct) + "%" : otaState == 3 ? String("Restarting...") : otaStatus;
   l["uptime"] = uptimeText();
+  if (battState != BS_NONE) {
+    l["batt"] = battText();
+    l["battOn"] = battState == BS_BATTERY;
+    l["battV"] = String(battV, 2) + " V, " + (battMaAvg < -1 ? "charging at " + String((int)-battMaAvg) + " mA" : battMaAvg > 1 ? "using " + String((int)battMaAvg) + " mA" : "resting");
+  }
   l["wifi"] = WiFi.SSID();
   l["ip"] = WiFi.localIP().toString();
   String out;
@@ -2768,6 +2858,7 @@ void loop() {
       lastBattCheck = millis();
       float v = batteryVolts(), mA = batteryMilliamps();
       battV = v;
+      battUpdate(v, mA);
       if (!ledBatteryRest && v > 2.5f && v < 3.65f && mA > 20) { ledBatteryRest = true; Serial.printf("Battery %.2f V: LEDs resting\n", v); }
       else if (ledBatteryRest && (v > 3.85f || mA < -20)) { ledBatteryRest = false; Serial.println("Battery OK: LEDs allowed again"); }
     }
@@ -3919,6 +4010,7 @@ fieldset[disabled] .card .small{opacity:1}
 .chk{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:15px}
 .chk input{width:22px;height:22px;accent-color:var(--acc)}
 .hide{display:none!important}
+.warnTxt{color:var(--warn);font-weight:600}
 </style>
 </head>
 <body>
@@ -3926,7 +4018,7 @@ fieldset[disabled] .card .small{opacity:1}
   <header>
     <p class="hello" id="hello">Hello</p>
     <div class="now" id="now">--:--</div>
-    <div class="facts"><span id="f_room">Inside --</span><span id="f_out"></span></div>
+    <div class="facts"><span id="f_room">Inside --</span><span id="f_out"></span><span id="f_batt"></span></div>
   </header>
 
   <!-- ============ LIGHT ============ -->
@@ -4132,6 +4224,7 @@ fieldset[disabled] .card .small{opacity:1}
       <h2>Software and updates</h2>
       <div class="small">Software <b id="ver">-</b> · running for <span id="uptime">-</span></div>
       <div class="small" style="margin-top:4px">Updates: <b id="upd">-</b></div>
+      <div class="small" style="margin-top:4px" id="battRow">Battery: <b id="battV">-</b></div>
       <label class="chk" style="margin-top:10px"><input type="checkbox" id="autoupd"> Install new software automatically (at night, around 3 AM)</label>
       <div class="btns">
         <button class="btn ghost" onclick="act('update',null,'Checking for an update...')">Check for updates now</button>
@@ -4281,7 +4374,7 @@ function paint(){
 function live(){
   const h=new Date().getHours();$('hello').textContent=(h<12?'Good morning':h<18?'Good afternoon':'Good evening')+(L.date?' · '+L.date:'');
   $('now').textContent=L.time||'--:--';
-  $('f_room').textContent=L.room?'Inside '+L.room:'';$('f_out').textContent=L.outside?'Outside '+L.outside:'';
+  $('f_room').textContent=L.room?'Inside '+L.room:'';$('f_out').textContent=L.outside?'Outside '+L.outside:'';const fb=$('f_batt');fb.textContent=L.batt||'';fb.classList.toggle('warnTxt',!!L.battOn);
   $('lightNote').textContent=L.ledsBlocked?('Waiting: '+L.ledsBlocked):(S.on?EFFECTS[S.effect][0]+' · turns off by itself':'Off');
   if(L.gesture){$('seen').textContent=L.gesture+' · '+(L.gestureAgo<60?L.gestureAgo+' s ago':Math.round(L.gestureAgo/60)+' min ago');
     if(L.gestureId!==live.last){if(live.last!==undefined){const b=$('seenBox');b.classList.remove('flash');void b.offsetWidth;b.classList.add('flash')}live.last=L.gestureId}}
@@ -4301,7 +4394,7 @@ function live(){
   const rs=S.rem||[];$('remEmpty').classList.toggle('hide',rs.length>0);
   $('remList').innerHTML=rs.map((r,i)=>`<li class="rem"><div class="remrow"><div><div>${esc(r.l)}</div><div class="small">${esc(r.when)}${r.on?'':' · off'}</div></div><div class="rembtns"><button class="btn ghost sm" onclick="remOp('toggle',${i})">${r.on?'Turn off':'Turn on'}</button><button class="btn ghost sm" onclick="remOp('del',${i})">Delete</button></div></div></li>`).join('');
   $('rainNow').textContent=L.rain||'';
-  $('ver').textContent=L.ver||'-';$('uptime').textContent=L.uptime||'-';$('upd').textContent=L.upd||'-';
+  $('ver').textContent=L.ver||'-';$('battRow').classList.toggle('hide',!L.battV);$('battV').textContent=L.battV||'-';$('uptime').textContent=L.uptime||'-';$('upd').textContent=L.upd||'-';
   if(S.ntfy){$('ntfyShow').textContent=S.ntfy;$('ntfyLink').href='https://ntfy.sh/'+S.ntfy;}
   ['otaurl','ntfy'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
   $('net').textContent=(L.wifi?'Connected to '+L.wifi:'')+(L.ip?' · '+L.ip:'');
