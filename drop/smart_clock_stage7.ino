@@ -40,6 +40,7 @@
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
+#include <driver/gpio.h>
 #include <mbedtls/sha256.h>
 #include "clock_support.h"   // trusted root certificates for GitHub and ntfy.sh + the update safety hook
 #if __has_include("build_info.h")
@@ -55,6 +56,19 @@
 struct Reminder { char label[44]; uint8_t h, m, days; uint16_t year; uint8_t mon, mday; bool on; uint32_t lastFire; };   // days: bit 0 = Sunday; 0 = one date
 struct ClockMsg { String text; uint32_t at; bool seen; bool hearted; };   // a message shown on the clock
 struct NtfyMsg { String title, body, tags; int prio; };   // a message for the phone (ntfy)
+// hand sync (see HAND SYNC below)
+struct HandSyncSaved {
+  uint8_t ver = 1, n = 0;                // number of passes being watched (1 or 2)
+  uint8_t drive = 0;                     // sensor LED drive it was learned with (the readings depend on it)
+  float c[2] = {0, 0};                   // window centre of each pass, in steps (0..959)
+  float ref[2] = {0, 0};                 // where the pass's centre sits in that window when the hands are right
+  float amp[2] = {0, 0}, base[2] = {0, 0};
+  uint32_t learnedAt = 0, fixes = 0;     // when learned (unix time), how many corrections since
+  int32_t fixedSteps = 0;                // total steps added (+) or taken back (-) since
+};
+const int HS_W = 128, HS_NB = 64;
+struct HsWin { bool in = false, clean = true; float sum[HS_NB]; uint16_t cnt[HS_NB]; };
+HandSyncSaved hsData;
 
 // fonts (bitmaps are at the bottom of this file)
 extern const GFXfont BigTime, Label27, Small13;
@@ -97,6 +111,7 @@ float lat = 0, lon = 0;
 bool useF = true;
 uint8_t rotation = 1;
 volatile uint32_t pulseMs = 11;
+volatile uint8_t climbMs = 6;                 // extra pulse while the second hand climbs from 6 up to 12
 
 // ---------------- live data ----------------
 struct Weather {
@@ -126,6 +141,7 @@ String lastDrawnKey;
 const int32_t CYCLE = 12L * 3600 * 16;        // steps in 12 hours = 691200
 volatile int32_t handPos = 0;                 // what the hands show, in steps
 volatile int32_t posRequest = -1;             // set handPos from the main loop (applied by the task)
+volatile int32_t posAdjust = 0;               // small correction from the hand-sync check (applied by the task)
 volatile bool handsHold = false, lowBattery = false, tzReady = false;
 volatile uint16_t fastMs = 50;                // ms per step while catching up
 volatile int testRequest = 0;                 // 1 = run the speed test
@@ -146,6 +162,13 @@ bool targetPos(int32_t &target) {
   return true;
 }
 
+// The second hand is lifted against gravity from 6 up to 12 (second 30 to 60): that's where
+// a weak push loses steps, so it gets a longer pulse there. Never more than 30 ms.
+uint32_t pulseFor(int32_t pos) {
+  int32_t s = pos % 960;
+  return min<uint32_t>(30, pulseMs + (s >= 480 ? climbMs : 0));
+}
+
 void oneStep(uint32_t pulse) {
   int pin = (handPos & 1) ? PIN_COIL_A : PIN_COIL_B;    // direction alternates with every step
   digitalWrite(pin, HIGH);
@@ -162,9 +185,8 @@ void speedTest() {
   vTaskDelay(pdMS_TO_TICKS(3000));
   for (uint16_t p : periods) {
     Serial.printf("  %2u ms per step (%.1fx normal speed)... ", p, 62.5f / p);
-    uint32_t pulse = min<uint32_t>((uint32_t)pulseMs, p - 4);
     TickType_t last = xTaskGetTickCount();
-    for (int i = 0; i < 960; i++) { oneStep(pulse); vTaskDelayUntil(&last, pdMS_TO_TICKS(p)); esp_task_wdt_reset(); }
+    for (int i = 0; i < 960; i++) { oneStep(min<uint32_t>(pulseFor(handPos), p - 4)); vTaskDelayUntil(&last, pdMS_TO_TICKS(p)); esp_task_wdt_reset(); }
     Serial.println("done - same spot?");
     vTaskDelay(pdMS_TO_TICKS(5000));
   }
@@ -179,6 +201,7 @@ void handsTask(void *) {
   for (;;) {
     esp_task_wdt_reset();
     if (posRequest >= 0) { handPos = wrapPos(posRequest); posRequest = -1; }
+    if (posAdjust) { handPos = wrapPos(handPos + posAdjust); posAdjust = 0; }
     if (testRequest) { speedTest(); testRequest = 0; }
     uint32_t now = millis();
     int32_t target;
@@ -186,13 +209,14 @@ void handsTask(void *) {
       lastFree = now;
     } else if (!targetPos(target)) {
       // time not known yet: just run like a normal clock (16 steps per second)
-      if (now - lastFree >= 62 + ((handPos & 1) ? 1 : 0)) { lastFree = now; oneStep(pulseMs); lastStep = now; }
+      if (now - lastFree >= 62 + ((handPos & 1) ? 1 : 0)) { lastFree = now; oneStep(pulseFor(handPos)); lastStep = now; }
     } else {
       int32_t d = target - handPos;                    // steps the hands are behind (+) or ahead (-)
       if (d > CYCLE / 2) d -= CYCLE;
       if (d < -CYCLE / 2) d += CYCLE;
       bool go = false;
-      uint32_t gap = pulseMs + 4;                     // never faster than this
+      uint32_t pulse = pulseFor(handPos);
+      uint32_t gap = pulse + 4;                       // never faster than this
       if (d > 0) {
         go = true;
         if (d > 2) gap = max<uint32_t>(gap, (uint32_t)fastMs);  // catching up
@@ -206,7 +230,7 @@ void handsTask(void *) {
       }
       if (go && now - lastStep >= gap) {
         lastStep = now;
-        oneStep(gap > fastMs ? pulseMs : min<uint32_t>((uint32_t)pulseMs, gap - 4));
+        oneStep(gap > fastMs ? pulse : min<uint32_t>(pulse, gap - 4));
       }
       lastFree = now;
     }
@@ -725,6 +749,9 @@ void calibrateBaseline() {
 
 void apdsConfigure() {
   calibrateBaseline();
+  if (!apdsIs9960 && hsData.n && hsData.drive != ledDrive9930) {   // hand sync was learned at another LED drive: keep that one
+    ledDrive9930 = hsData.drive; configure9930();
+  }
   uint16_t margin = marginFor();
   Serial.printf("Gesture sensor (%s): background %u, trigger at %u\n", apdsIs9960 ? "APDS-9960" : "APDS-9930", proxBase, proxBase + margin);
   if (!apdsIs9960) return;
@@ -751,6 +778,252 @@ bool apdsBegin() {
 // which gestures this sensor can do (shown on the settings page)
 bool gestureSupported(int g) { return apdsIs9960 || g >= G_TAP; }
 
+// =====================================================================
+//  HAND SYNC: the gesture sensor checks where the second hand really is
+//  The movement sometimes misses a step, and nothing inside the clock can feel that. But the
+//  sensor at 6 o'clock sees the second hand (and its tail) go past every minute. Once the
+//  clock has learned exactly where that pass shows up while the hands are known to be right,
+//  a pass that shows up later means the hands have slipped: the clock adds the missing steps.
+//    1. profile:  a few minutes of readings around the whole dial -> where the passes are
+//    2. learn:    the exact centre of each pass, measured over 5 laps -> the reference
+//    3. track:    every lap is measured the same way; when the last laps agree the hands are
+//                 off by 5+ steps (0.3 s), the difference is corrected (at most 3 s at a time)
+//  Learning starts whenever someone sets or nudges the hands (they're right at that moment),
+//  or with the "The hands are right now" button.
+// =====================================================================
+enum SyncState : uint8_t { HS_OFF, HS_NEED, HS_PROFILE, HS_LEARN, HS_TRACK, HS_FAILED };
+const char *SYNC_STATE_NAMES[] = {"off", "not learned", "profile", "learning", "tracking", "failed"};
+volatile uint8_t hsState = HS_NEED;
+bool hsEnabled = true;
+uint32_t hsPhaseStart = 0, hsLastFixAt = 0, hsRetryAt = 0;
+int32_t hsLastFix = 0;
+// stage 1: lap profile, 240 bins of 4 steps
+float *hsProfSum = nullptr; uint16_t *hsProfCnt = nullptr;
+// stages 2 and 3: one measuring window per pass, +-128 steps (8 s) in 64 bins of 4 steps
+
+HsWin hsWin[2];
+float hsLearnC[2][8], hsLearnA[2][8], hsLearnB[2][8]; int hsLearnN[2] = {0, 0};
+float hsRing[7]; int hsRingN = 0, hsRingPos = 0;
+
+void hsSave() { prefs.begin("clock", false); prefs.putBytes("hsync", &hsData, sizeof hsData); prefs.end(); }
+void hsLoad() {
+  prefs.begin("clock", true);
+  hsEnabled = prefs.getBool("hsyncOn", true);
+  HandSyncSaved t;
+  bool ok = prefs.getBytes("hsync", &t, sizeof t) == sizeof t && t.ver == 1 && t.n >= 1 && t.n <= 2;
+  prefs.end();
+  if (ok) hsData = t;
+  hsState = !hsEnabled ? HS_OFF : ok ? HS_TRACK : HS_NEED;
+}
+
+// the hands are right now (someone just set them): learn from here
+void hsStartLearning() {
+  if (!hsEnabled) return;
+  if (!hsProfSum) { hsProfSum = (float *)calloc(240, sizeof(float)); hsProfCnt = (uint16_t *)calloc(240, sizeof(uint16_t)); }
+  if (!hsProfSum || !hsProfCnt) return;
+  memset(hsProfSum, 0, 240 * sizeof(float)); memset(hsProfCnt, 0, 240 * sizeof(uint16_t));
+  hsWin[0].in = hsWin[1].in = false;
+  hsLearnN[0] = hsLearnN[1] = 0; hsRingN = 0;
+  hsPhaseStart = millis();
+  if (hsData.n) { hsState = HS_LEARN; Serial.println("[sync] the hands are right: measuring the passes again"); return; }   // already know where the passes are
+  hsState = HS_PROFILE;
+  Serial.println("[sync] the hands are right: learning where the second hand passes the sensor");
+}
+
+bool hsHandsSteady() {                     // hands running and on time (not catching up, waiting or paused)
+  int32_t target;
+  if (handsHold || lowBattery || testRequest || posRequest >= 0 || posAdjust || !targetPos(target)) return false;
+  int32_t d = target - handPos;
+  if (d > CYCLE / 2) d -= CYCLE;
+  if (d < -CYCLE / 2) d += CYCLE;
+  return abs(d) <= 2;
+}
+
+// one finished window -> centre of the pass (steps, relative to the window centre), its height and the floor
+bool hsMeasure(const HsWin &w, float &centre, float &amp, float &base) {
+  float m[HS_NB]; int filled = 0;
+  for (int i = 0; i < HS_NB; i++) { if (w.cnt[i]) { m[i] = w.sum[i] / w.cnt[i]; filled++; } else m[i] = NAN; }
+  if (filled < HS_NB - 6) return false;
+  for (int i = HS_NB / 2 - 10; i < HS_NB / 2 + 10; i++) if (isnan(m[i])) return false;   // a gap near the middle (e.g. a screen refresh)
+  float bs = 0; int bn = 0;
+  for (int i = 0; i < 6; i++) { if (!isnan(m[i])) { bs += m[i]; bn++; } if (!isnan(m[HS_NB - 1 - i])) { bs += m[HS_NB - 1 - i]; bn++; } }
+  if (bn < 6) return false;
+  base = bs / bn;
+  float noise = 0;
+  for (int i = 0; i < 6; i++) { if (!isnan(m[i])) noise += fabsf(m[i] - base); if (!isnan(m[HS_NB - 1 - i])) noise += fabsf(m[HS_NB - 1 - i] - base); }
+  noise /= bn;
+  float mx = -1e9f;
+  for (int i = 0; i < HS_NB; i++) if (!isnan(m[i])) mx = max(mx, m[i]);
+  amp = mx - base;
+  if (amp < max(20.0f, noise * 4 + 5)) return false;
+  float cut = base + amp * 0.25f, sw = 0, sp = 0;
+  for (int i = 0; i < HS_NB; i++) {
+    if (isnan(m[i]) || m[i] <= cut) continue;
+    float wgt = m[i] - cut;
+    sw += wgt; sp += wgt * (-HS_W + i * 4 + 1.5f);
+  }
+  if (sw <= 0) return false;
+  centre = sp / sw;
+  return true;
+}
+
+void hsFindPasses() {
+  float m[240], sm[240], tmp[240];
+  for (int i = 0; i < 240; i++) m[i] = hsProfCnt[i] ? hsProfSum[i] / hsProfCnt[i] : NAN;
+  {                                                       // fill unseen spots from their neighbours
+    float tmp0[240]; int k = 0;
+    for (int i = 0; i < 240; i++) if (!isnan(m[i])) tmp0[k++] = m[i];
+    if (k < 120) { hsState = HS_FAILED; hsRetryAt = millis() + 30UL * 60 * 1000; return; }
+    std::nth_element(tmp0, tmp0 + k / 2, tmp0 + k);
+    for (int i = 0; i < 240; i++) if (isnan(m[i])) m[i] = tmp0[k / 2];
+  }
+  for (int i = 0; i < 240; i++) sm[i] = (m[(i + 239) % 240] + 2 * m[i] + m[(i + 1) % 240]) / 4;
+  memcpy(tmp, sm, sizeof tmp);
+  std::nth_element(tmp, tmp + 120, tmp + 240);
+  float med = tmp[120];
+  int p1 = 0;
+  for (int i = 1; i < 240; i++) if (sm[i] > sm[p1]) p1 = i;
+  float a1 = sm[p1] - med;
+  int p2 = -1;
+  for (int i = 0; i < 240; i++) {
+    int dd = abs(i - p1); dd = min(dd, 240 - dd);
+    if (dd < 60) continue;
+    if (p2 < 0 || sm[i] > sm[p2]) p2 = i;
+  }
+  if (a1 < 20) {
+    hsState = HS_FAILED; hsRetryAt = millis() + 30UL * 60 * 1000;
+    Serial.printf("[sync] can't see the second hand clearly (strongest pass only %.0f above the floor) - trying again in 30 min\n", a1);
+    return;
+  }
+  hsData.n = 1; hsData.c[0] = p1 * 4 + 2;
+  if (p2 >= 0 && sm[p2] - med >= max(20.0f, a1 * 0.4f)) { hsData.n = 2; hsData.c[1] = p2 * 4 + 2; }
+  Serial.printf("[sync] second hand seen at second %.1f (height %.0f)%s\n", hsData.c[0] / 16, a1,
+                hsData.n == 2 ? (" and its tail at second " + String(hsData.c[1] / 16, 1)).c_str() : "");
+  hsLearnN[0] = hsLearnN[1] = 0;
+  hsWin[0].in = hsWin[1].in = false;
+  hsState = HS_LEARN; hsPhaseStart = millis();
+}
+
+void hsApplyFix(float off) {
+  int32_t k = constrain((int32_t)lroundf(off), -48, 48);   // at most 3 s at a time
+  posAdjust = -k;                                          // the hands are k steps behind where the clock thought: it catches up
+  hsData.fixes++; hsData.fixedSteps += k; hsLastFix = k; hsLastFixAt = millis();
+  hsSave();
+  for (int i = 0; i < hsRingN; i++) hsRing[i] -= k;          // keep the recent laps, as they'll look after this fix
+  Serial.printf("[sync] hands were %.2f s %s - corrected (%lu fixes so far, %.1f s in all)\n", fabsf(k) / 16.0f, k > 0 ? "behind" : "ahead",
+                (unsigned long)hsData.fixes, hsData.fixedSteps / 16.0f);
+}
+
+void hsLapDone(int k, bool measure) {
+  float c = 0, a = 0, b = 0;
+  if (measure && !(hsWin[k].clean && hsMeasure(hsWin[k], c, a, b))) return;
+  if (hsState == HS_LEARN) {
+    int &n = hsLearnN[k];
+    if (measure && n < 8) { hsLearnC[k][n] = c; hsLearnA[k][n] = a; hsLearnB[k][n] = b; n++; }
+    bool done = true;
+    for (int j = 0; j < hsData.n; j++) if (hsLearnN[j] < 3) done = false;
+    if (!done) return;
+    for (int j = 0; j < hsData.n; j++) {
+      float cs = 0, as = 0, bs = 0; int nn = hsLearnN[j];
+      for (int i = 0; i < nn; i++) { cs += hsLearnC[j][i]; as += hsLearnA[j][i]; bs += hsLearnB[j][i]; }
+      float mean = cs / nn, spread = 0;
+      for (int i = 0; i < nn; i++) spread = max(spread, fabsf(hsLearnC[j][i] - mean));
+      if (spread > 5) {                                     // laps don't agree: start this stage again
+        Serial.printf("[sync] pass %d measurements too scattered (%.1f steps) - measuring again\n", j + 1, spread);
+        hsLearnN[0] = hsLearnN[1] = 0;
+        if (millis() - hsPhaseStart > 30UL * 60 * 1000) { hsState = HS_FAILED; hsRetryAt = millis() + 30UL * 60 * 1000; }
+        return;
+      }
+      hsData.ref[j] = mean; hsData.amp[j] = as / nn; hsData.base[j] = bs / nn;
+    }
+    hsData.drive = ledDrive9930;
+    hsData.learnedAt = timeKnown() ? time(nullptr) : 0; hsData.fixes = 0; hsData.fixedSteps = 0; hsLastFixAt = 0;
+    hsSave(); hsState = HS_TRACK; hsRingN = 0;
+    if (hsProfSum) { free(hsProfSum); free(hsProfCnt); hsProfSum = nullptr; hsProfCnt = nullptr; }
+    Serial.println("[sync] learned - keeping the hands in sync from now on");
+    return;
+  }
+  // tracking: is this pass the same one we learned? (a person or a parked hand looks different)
+  if (a < hsData.amp[k] * 0.5f || a > hsData.amp[k] * 2.0f || fabsf(b - hsData.base[k]) > max(40.0f, hsData.amp[k] * 0.5f)) return;
+  float off = c - hsData.ref[k];
+  Serial.printf("[sync] lap: %+.1f steps\n", off);
+  hsRing[hsRingPos] = off; hsRingPos = (hsRingPos + 1) % 7; if (hsRingN < 7) hsRingN++;
+  if (hsRingN < 5) return;
+  float t[7]; memcpy(t, hsRing, sizeof t);
+  std::sort(t, t + hsRingN);
+  float med = t[hsRingN / 2], dev[7];
+  for (int i = 0; i < hsRingN; i++) dev[i] = fabsf(t[i] - med);
+  std::sort(dev, dev + hsRingN);
+  if (dev[hsRingN / 2] <= 3 && fabsf(med) >= 5) hsApplyFix(med);
+  else if (t[0] >= 5) hsApplyFix(t[0]);                    // slipping fast: every lap says behind - fix the smallest amount they all agree on
+  else if (t[hsRingN - 1] <= -5) hsApplyFix(t[hsRingN - 1]);
+}
+
+// called with every distance reading (about every 15-30 ms)
+void hsSample(int p) {
+  if (hsState < HS_PROFILE || hsState == HS_FAILED) return;
+  if (hsState == HS_LEARN && hsData.n == 2 && millis() - hsPhaseStart > 10UL * 60 * 1000 && hsLearnN[0] >= 3 && hsLearnN[1] < 3) {
+    hsData.n = 1;                                             // the tail pass never measures cleanly (e.g. the screen refreshes then): use the main one
+    Serial.println("[sync] using only the main pass");
+    hsLapDone(0, false);
+    return;
+  }
+  bool steady = hsHandsSteady();
+  int32_t pos = handPos % 960;
+  if (hsState == HS_PROFILE) {
+    if (!steady) return;
+    int b = pos / 4;
+    hsProfSum[b] += p; hsProfCnt[b]++;
+    if (millis() - hsPhaseStart < 125000) return;         // at least 2 laps
+    int thin = 0;                                         // the screen refresh hides the same spot every minute: allow a few
+    for (int i = 0; i < 240; i++) if (hsProfCnt[i] < 6) thin++;
+    if (thin > 12 && millis() - hsPhaseStart < 900000) return;
+    hsFindPasses();
+    return;
+  }
+  for (int k = 0; k < hsData.n; k++) {
+    HsWin &w = hsWin[k];
+    int cI = (int)lroundf(hsData.c[k]);
+    int rel = ((pos - cI) % 960 + 960 + 480) % 960 - 480;    // -480..479
+    bool inside = rel >= -HS_W && rel < HS_W;
+    if (inside && !w.in) {                                 // entering the window: start fresh
+      if (rel > -HS_W + 8) continue;                        // came in part-way (after a jump): skip this lap
+      w.in = true; w.clean = true;
+      memset(w.sum, 0, sizeof w.sum); memset(w.cnt, 0, sizeof w.cnt);
+    }
+    if (!w.in) continue;
+    if (!inside) {                                         // left the window: measure it
+      w.in = false;
+      if (rel >= HS_W && rel < HS_W + 16) hsLapDone(k, true);
+      continue;
+    }
+    if (!steady) w.clean = false;
+    int bi = (rel + HS_W) / 4;
+    w.sum[bi] += p; w.cnt[bi]++;
+  }
+}
+
+String hsText() {
+  switch (hsState) {
+    case HS_OFF: return "Off.";
+    case HS_NEED: return "Not learned yet. When the hands are exactly right, tap \"The hands are right now\".";
+    case HS_PROFILE: case HS_LEARN: return "Learning where the second hand passes the sensor. This takes about 10 minutes; please keep hands away from the window.";
+    case HS_FAILED: return "Couldn't see the second hand clearly enough. When the hands are exactly right, tap \"The hands are right now\" to try again.";
+  }
+  String s = "On. ";
+  if (!hsData.fixes) s += "No corrections needed so far.";
+  else {
+    s += String(hsData.fixes) + (hsData.fixes == 1 ? " small correction" : " small corrections") + " (" + String(fabsf(hsData.fixedSteps) / 16.0f, 1) + " s in all)";
+    if (hsData.learnedAt && timeKnown()) {
+      float h = (time(nullptr) - (time_t)hsData.learnedAt) / 3600.0f;
+      if (h >= 3) s += ", about " + String(fabsf(hsData.fixedSteps) / 16.0f / h, 1) + " s an hour";
+    }
+    s += ".";
+    if (hsLastFixAt) s += " Last one " + String((millis() - hsLastFixAt) / 60000) + " min ago.";
+  }
+  return s;
+}
+
 // ---- APDS-9930: taps and holds from the distance reading
 // The background map is indexed by where the clock thinks the second hand is. Bins where the map is
 // high are where a clock hand covers the window: nothing can be seen there, so events that happen
@@ -773,6 +1046,7 @@ int poll9930() {
   int p = prox9930();
   if (p < 0) return -1;
   lastProximity = p;
+  hsSample(p);
   uint32_t now = millis();
   int b = bgBin();
   // Each half-second of the second hand's lap is learned on its own the first time the hand goes
@@ -962,6 +1236,7 @@ void loadSettings() {
   useF = prefs.getBool("useF", true);
   rotation = prefs.getUChar("rot", 1);
   pulseMs = prefs.getUChar("pulse", 11);
+  climbMs = prefs.getUChar("climb", 6);
   fastMs = prefs.getUShort("fast", 50);
   if (prefs.isKey("utcoff")) { wx.utcOffset = prefs.getLong("utcoff", 0); tzReady = true; }
   prefs.end();
@@ -1243,7 +1518,7 @@ void printStatus() {
     if (abs(d) <= 2) Serial.print("in step");
     else Serial.printf("%s by %.1f s", d > 0 ? "behind" : "ahead", abs(d) / 16.0f);
   } else Serial.print(", real time not known yet");
-  Serial.printf("%s. Catch-up speed %u ms/step, pulse %u ms\n", handsHold ? " [HELD]" : "", fastMs, (unsigned)pulseMs);
+  Serial.printf("%s. Catch-up speed %u ms/step, pulse %u ms (+%u climbing), hand sync %s\n", handsHold ? " [HELD]" : "", fastMs, (unsigned)pulseMs, (unsigned)climbMs, SYNC_STATE_NAMES[hsState]);
 }
 
 void handleCommand(String cmd) {
@@ -1257,6 +1532,7 @@ void handleCommand(String cmd) {
       delay(5);
       handsHold = false;
       saveHands(true);
+      hsStartLearning();
       Serial.printf("OK: hands show %d:%02d:%02d. Catching up to the real time...\n", hh, mm, ss);
       delay(50); printStatus();
     } else Serial.println("Type it like:  c 10:08:30");
@@ -1265,7 +1541,7 @@ void handleCommand(String cmd) {
     int32_t step = (cmd == "]" || cmd == "[") ? 16 : 960;            // 1 second or 1 minute
     bool behind = (cmd == "]" || cmd == "}");
     posRequest = wrapPos(handPos + (behind ? -step : step));
-    delay(5); saveHands(true);
+    delay(5); saveHands(true); hsStartLearning();
     Serial.printf("Noted: hands %s by %s\n", behind ? "behind" : "ahead", step == 16 ? "1 second" : "1 minute");
   }
   else if (cmd == "t") testRequest = 1;
@@ -1654,6 +1930,8 @@ String statusLine() {
   if (!isnan(roomC)) s += " | inside " + String(useF ? roomC * 9 / 5 + 32 : roomC, 0) + (useF ? "F" : "C");
   s += " | hands " + handTimeText(handPos);
   if (handsHold) s += " (paused)";
+  s += " | sync " + String(SYNC_STATE_NAMES[hsState]);
+  if (hsState == HS_TRACK && hsData.fixes) s += " (" + String(hsData.fixes) + " fixes, " + String(hsData.fixedSteps / 16.0f, 1) + " s)";
   if (lowBattery) s += " | LOW BATTERY";
   return s;
 }
@@ -2531,7 +2809,7 @@ void handleState() {
   s["wake"] = cfg.wakeOnAny ? 1 : 0;
   s["srot"] = cfg.sensorRotate; s["smir"] = cfg.sensorMirror ? 1 : 0; s["sens"] = cfg.sensitivity;
   s["nled"] = cfg.ledCount; s["maxma"] = cfg.maxmA; s["lstart"] = cfg.ledStartHour % 12; s["ldir"] = cfg.ledClockwise ? 1 : 0;
-  s["em"] = cfg.effectMask; s["chime"] = cfg.hourChime ? 1 : 0; s["fast"] = (int)fastMs; s["pulse"] = (int)pulseMs;
+  s["em"] = cfg.effectMask; s["chime"] = cfg.hourChime ? 1 : 0; s["fast"] = (int)fastMs; s["pulse"] = (int)pulseMs; s["climb"] = (int)climbMs; s["hsync"] = hsEnabled ? 1 : 0;
   s["units"] = useF ? "F" : "C"; s["zip"] = zipCode;
   s["hbglow"] = hbGlowOn ? 1 : 0;
   s["rainwarn"] = rainWarnOn ? 1 : 0;
@@ -2574,6 +2852,8 @@ void handleState() {
   for (int i = 0; i < G_COUNT; i++) if (apdsOK && gestureSupported(i)) gs.add(i);
   // hands
   l["handsShow"] = handTimeText(handPos);
+  l["sync"] = (!apdsOK || apdsIs9960) ? "Needs the gesture sensor." : hsText();
+  l["syncState"] = SYNC_STATE_NAMES[hsState];
   int32_t target;
   if (handsHold) { l["handsState"] = "held"; l["handsChip"] = "Paused"; l["handsNote"] = "The hands are paused. Use \"Hands showing the wrong time?\" to set them and start them again."; }
   else if (!targetPos(target)) { l["handsState"] = "wait"; l["handsChip"] = "Getting the time"; l["handsNote"] = "Waiting for the time from the internet."; }
@@ -2647,6 +2927,11 @@ void handleSet() {
     prefs.begin("clock", false);
     if (k == "fast" && n >= 10 && n <= 62) { fastMs = n; prefs.putUShort("fast", n); }
     else if (k == "pulse" && n >= 3 && n <= 30) { pulseMs = n; prefs.putUChar("pulse", n); }
+    else if (k == "climb" && n >= 0 && n <= 15) { climbMs = n; prefs.putUChar("climb", n); }
+    else if (k == "hsync") {
+      hsEnabled = n != 0; prefs.putBool("hsyncOn", hsEnabled);
+      hsState = !hsEnabled ? HS_OFF : hsData.n ? HS_TRACK : HS_NEED;
+    }
     else if (k == "rainwarn") { rainWarnOn = n != 0; prefs.putBool("rainwarn", rainWarnOn); if (!rainWarnOn) rainSoon = false; lastDrawnKey = ""; }
     else if (k == "hbglow") { hbGlowOn = n != 0; prefs.putBool("hbglow", hbGlowOn); if (!hbGlowOn) hbUntil = 0; }
     else if (k == "autoupd") { autoUpdate = n != 0; prefs.putBool("autoupd", autoUpdate); }
@@ -2687,11 +2972,15 @@ void handleDo() {
     int hh = 0, mm = 0, ss = 0;
     if (sscanf(v.c_str(), "%d:%d:%d", &hh, &mm, &ss) >= 2 && hh >= 1 && hh <= 12 && mm < 60 && ss < 60) {
       posRequest = ((hh % 12) * 3600 + mm * 60 + ss) * 16;
-      delay(5); handsHold = false; saveHands(true);
+      delay(5); handsHold = false; saveHands(true); hsStartLearning();
       msg = "Hands set - catching up now";
     } else msg = "That time didn't look right";
   }
-  else if (a == "nudge") { posRequest = wrapPos(handPos + v.toInt()); delay(5); saveHands(true); msg = "Done"; }
+  else if (a == "nudge") { posRequest = wrapPos(handPos + v.toInt()); delay(5); saveHands(true); hsStartLearning(); msg = "Done"; }
+  else if (a == "hsync") {
+    if (!hsEnabled) msg = "Turn on \"Keep the hands in sync\" first";
+    else { hsStartLearning(); msg = "Learning - about 10 minutes"; }
+  }
   else if (a == "speedtest") { testRequest = 1; msg = "Speed test running"; }
   else if (a == "rotate") {
     rotation = (rotation + 1) % 4;
@@ -2748,6 +3037,9 @@ void setup() {
   pinMode(PIN_LED_DATA, INPUT);            // high-impedance while the strip is unpowered
   pinMode(PIN_COIL_A, OUTPUT); digitalWrite(PIN_COIL_A, LOW);
   pinMode(PIN_COIL_B, OUTPUT); digitalWrite(PIN_COIL_B, LOW);
+  // the coil hangs straight off these two pins: let them push as hard as they can (about 40 mA instead of 20)
+  gpio_set_drive_capability((gpio_num_t)PIN_COIL_A, GPIO_DRIVE_CAP_3);
+  gpio_set_drive_capability((gpio_num_t)PIN_COIL_B, GPIO_DRIVE_CAP_3);
 
   Serial.begin(115200);
 #if ARDUINO_USB_CDC_ON_BOOT
@@ -2756,6 +3048,7 @@ void setup() {
   delay(500);
   Serial.println("\nSmart Clock v2 - stage 7");
   loadSettings();
+  hsLoad();
   stage5Begin();
   msgLock = xSemaphoreCreateMutex();
   loadMsgs();
@@ -4149,6 +4442,10 @@ fieldset[disabled] .card .small{opacity:1}
         <button class="btn ghost" onclick="act('nudge',-16,'Hands moved 1 second forward')">It's 1 s behind</button>
         <button class="btn ghost" onclick="act('nudge',16,'Hands will wait 1 second')">It's 1 s ahead</button>
       </div>
+      <h3 style="margin:18px 0 4px;font-size:16px">Keeping them in sync</h3>
+      <div class="small" id="syncNote">-</div>
+      <button class="btn ghost" style="margin-top:10px" id="syncBtn" onclick="act('hsync',null)">The hands are right now</button>
+      <label class="chk" style="margin-top:10px"><input type="checkbox" id="hsync"> Check the second hand with the sensor and fix small slips</label>
     </div>
 
     <div class="card">
@@ -4210,6 +4507,8 @@ fieldset[disabled] .card .small{opacity:1}
         <div><label for="fast">Catch-up speed</label><select id="fast"><option value="62">Off</option><option value="56">56 ms</option><option value="50">50 ms (tested)</option><option value="45">45 ms</option><option value="40">40 ms</option></select></div>
         <div><label for="pulse">Pulse (ms)</label><input type="number" id="pulse" min="3" max="30"></div>
       </div>
+      <label for="climb">Extra push from 6 up to 12 (ms)</label><input type="number" id="climb" min="0" max="15">
+      <div class="small" style="margin-top:4px">Added to the pulse while the second hand climbs, where steps are most likely to slip. The total never goes above 30 ms.</div>
       <div class="btns"><button class="btn ghost" onclick="act('hold',null)">Pause / run hands</button><button class="btn ghost" onclick="act('speedtest',null,'Speed test running')">Speed test</button></div>
     </div>
 
@@ -4328,8 +4627,8 @@ $('emask').onchange=()=>{let m=0;document.querySelectorAll('#emask input').forEa
 // simple controls: change -> save
 $('on').onchange=e=>setv('on',e.target.checked?1:0,e.target.checked?'Light on':'Light off');
 let bt;$('bright').oninput=e=>{clearTimeout(bt);bt=setTimeout(()=>setv('bright',e.target.value,'Brightness set'),250)};
-['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>$(k).onchange=e=>setv(k,e.target.value));
-['night','wake','smir','chime','autoupd','health','hbglow','rainwarn'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
+['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse','climb'].forEach(k=>$(k).onchange=e=>setv(k,e.target.value));
+['night','wake','smir','chime','autoupd','health','hbglow','rainwarn','hsync'].forEach(k=>$(k).onchange=e=>{setv(k,e.target.checked?1:0);paint()});
 $('units').onclick=e=>{const b=e.target.closest('button');if(b)setv('units',b.dataset.v)};
 
 // tabs
@@ -4363,8 +4662,8 @@ function paint(){
   let matched=false;document.querySelectorAll('.dot[data-c]').forEach(d=>{const m=d.dataset.c.toLowerCase()===c.toLowerCase();d.classList.toggle('sel',m);matched=matched||m});
   document.querySelector('.dot.custom').classList.toggle('sel',!matched);
   if(Date.now()-busy>1500){$('bright').value=S.bright;}
-  ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
-  ['night','wake','smir','chime','autoupd','health','hbglow','rainwarn'].forEach(k=>$(k).checked=!!S[k]);
+  ['onsec','nfrom','nto','nled','maxma','lstart','ldir','sens','srot','fast','pulse','climb'].forEach(k=>{if(document.activeElement!==$(k)&&S[k]!=null)$(k).value=S[k]});
+  ['night','wake','smir','chime','autoupd','health','hbglow','rainwarn','hsync'].forEach(k=>$(k).checked=!!S[k]);
   $('nightTimes').classList.toggle('hide',!S.night);
   if(S.g)S.g.forEach((a,i)=>$('gp'+i).textContent=ACTIONS[a]);
   document.querySelectorAll('#units button').forEach(b=>b.classList.toggle('sel',b.dataset.v===S.units));
@@ -4381,6 +4680,7 @@ function live(){
   $('handsShow').textContent=L.handsShow||'--:--:--';
   const chip=$('handsChip');chip.textContent=L.handsChip||'';chip.classList.toggle('warn',L.handsState!=='ok');
   $('handsNote').textContent=L.handsNote||'';
+  $('syncNote').textContent=L.sync||'-';$('syncBtn').classList.toggle('hide',!S.hsync||L.syncState==='profile'||L.syncState==='learning');
   $('prox').textContent=L.prox;$('proxBase').textContent=L.proxBase;
   $('sensor').textContent=L.sensor==='9960'?'APDS-9960 (swipes, taps and holds)':L.sensor==='9930'?'APDS-9930 (taps and holds)':'not found';
   const sup=L.gestures||[];const swipes=sup.indexOf(0)>=0;
