@@ -270,6 +270,19 @@ float battPct = -1;                            // smoothed charge estimate, 0..1
 float battMaAvg = 0;                           // smoothed current, + = battery running the clock
 float battMaSlow = 0;                          // slower average, for "hours left"
 const float BATT_MAH = 3000;
+// Battery gauge: counts the charge going in and out of the battery (the INA226 sits on the
+// battery lead, so it sees all of it). Much more accurate than guessing from the voltage.
+// Resets to 100 % at a real full charge, learns the true capacity on a full-to-empty run,
+// and keeps its count through restarts and updates.
+RTC_NOINIT_ATTR uint32_t gaugeMagic;
+RTC_NOINIT_ATTR float gaugeRtcMah, gaugeRtcNet;
+RTC_NOINIT_ATTR uint8_t gaugeRtcCal, gaugeRtcFromFull;
+float gaugeMah = -1;                           // charge in the battery now (mAh), -1 = not started
+float gaugeCap = BATT_MAH;                     // capacity (learned after a full-to-empty run)
+bool gaugeCal = false;                         // true once anchored at a real full charge
+bool gaugeFromFull = false;                    // counting down from a full anchor (for learning the capacity)
+bool gaugeCapLearned = false;
+float gaugeNet = 0;                            // mAh taken out since the last full anchor
 
 // =====================================================================
 //  LIGHT + GESTURE SETTINGS (saved together as one block in flash)
@@ -1476,7 +1489,7 @@ void updateAll(bool forceFull) {
   // battery guard: if USB is unplugged and the battery runs low, park the hands (position saved) until power returns
   float v = batteryVolts(), mA = batteryMilliamps();
   if (!lowBattery && v > 2.5f && v < 3.45f && mA > 5) {
-    lowBattery = true; saveHands(true);
+    lowBattery = true; saveHands(true); gaugeEmpty();
     Serial.printf("Battery low (%.2f V): hands parked\n", v);
     drawMessage("Battery low", "Plug in the USB cable.", "The hands are parked", "and will catch up.");
   } else if (lowBattery && (v > 3.75f || mA < -5)) {
@@ -1868,6 +1881,7 @@ void battUpdate(float v, float mA) {
   float p = lipoPercent(vRest);
   if (s == BS_FULL && !ledsPowered && v >= 4.1f) p = 100;
   battPct = (battPct < 0) ? p : battPct + (p - battPct) * 0.15f;
+  if (gaugeCal && gaugeMah >= 0) battPct = gaugePct();              // counted charge: much more accurate
   if (s == BS_BATTERY) battMaSlow = battMaSlow <= 0 ? battMaAvg : battMaSlow + (battMaAvg - battMaSlow) * 0.03f;
   // tell the phone about a power cut (after 2 minutes on battery) and when the power comes back
   static uint32_t onBattSince = 0;
@@ -1887,17 +1901,115 @@ void battUpdate(float v, float mA) {
   first = false;
 }
 
-int battPctShown() { return battPct < 0 ? -1 : constrain((int)((battPct + 2.5f) / 5) * 5, 0, 100); }   // steps of 5 %
+// ---------- battery gauge ----------
+void inaWrite(uint8_t reg, uint16_t v) {
+  Wire.beginTransmission(0x40); Wire.write(reg); Wire.write(v >> 8); Wire.write(v & 0xFF); Wire.endTransmission();
+}
+void gaugeSave() {
+  prefs.begin("clock", false);
+  prefs.putFloat("gmah", gaugeMah); prefs.putBool("gcal", gaugeCal); prefs.putFloat("gcap", gaugeCap);
+  prefs.putBool("gcapl", gaugeCapLearned); prefs.putBool("gfull", gaugeFromFull); prefs.putFloat("gnet", gaugeNet);
+  prefs.end();
+}
+float gaugeVoltPct(float v, float mA) { return lipoPercent(v + mA / 1000.0f * 0.2f - (mA < -8 ? 0.05f : 0)); }
+void gaugeBegin() {
+  inaWrite(0x00, 0x4D27);       // INA226: average 512 samples (about 1.1 s per reading), continuous
+  prefs.begin("clock", true);
+  gaugeCap = constrain(prefs.getFloat("gcap", BATT_MAH), BATT_MAH * 0.4f, BATT_MAH * 1.2f);
+  gaugeCapLearned = prefs.getBool("gcapl", false);
+  float nvMah = prefs.getFloat("gmah", -1); bool nvCal = prefs.getBool("gcal", false);
+  bool nvFull = prefs.getBool("gfull", false); float nvNet = prefs.getFloat("gnet", 0);
+  prefs.end();
+  if (gaugeMagic == 0x6A1E0001 && gaugeRtcMah >= 0 && gaugeRtcMah < 5000) {      // restart or update: count carried on in memory
+    gaugeMah = gaugeRtcMah; gaugeCal = gaugeRtcCal; gaugeFromFull = gaugeRtcFromFull; gaugeNet = gaugeRtcNet;
+    Serial.printf("Battery gauge: %.0f mAh (kept through the restart)%s\n", gaugeMah, gaugeCal ? "" : ", not calibrated yet");
+    return;
+  }
+  // power-on: use the saved count if it agrees with the voltage, otherwise start again from the voltage
+  delay(1200);                                  // let the INA226 finish its first averaged reading
+  float v = batteryVolts(), mA = batteryMilliamps();
+  if (!(v > 2.5f)) return;
+  float vp = gaugeVoltPct(v, mA);
+  if (nvMah >= 0 && fabsf(nvMah / gaugeCap * 100 - vp) < 15) {
+    gaugeMah = nvMah; gaugeCal = nvCal; gaugeFromFull = nvFull; gaugeNet = nvNet;
+  } else {
+    gaugeMah = vp / 100 * gaugeCap; gaugeCal = false; gaugeFromFull = false; gaugeNet = 0;
+  }
+  Serial.printf("Battery gauge: %.0f mAh of %.0f%s\n", gaugeMah, gaugeCap, gaugeCal ? "" : " (estimated from the voltage until the first full charge)");
+}
+// the battery just ran down to where the hands park: that's empty. If we counted all the way from full, we now know the real capacity.
+void gaugeEmpty() {
+  if (gaugeFromFull && gaugeNet > BATT_MAH * 0.4f) {
+    float learned = constrain(gaugeNet, BATT_MAH * 0.4f, BATT_MAH * 1.2f);
+    gaugeCap = gaugeCapLearned ? gaugeCap * 0.5f + learned * 0.5f : learned;
+    gaugeCapLearned = true;
+    Serial.printf("Battery gauge: learned the real capacity, %.0f mAh\n", gaugeCap);
+  }
+  gaugeMah = 0; gaugeFromFull = false; gaugeNet = 0;
+  gaugeSave();
+}
+// call about once a second from the main loop
+void gaugeTick() {
+  static uint32_t last = 0, fullSince = 0, lastSave = 0, lastCheck = 0;
+  uint32_t now = millis();
+  if (now - last < 1000) return;
+  float dtH = last ? (now - last) / 3600000.0f : 0;
+  last = now;
+  float v = batteryVolts();
+  if (!(v > 2.5f)) return;
+  float mA = batteryMilliamps();
+  if (gaugeMah < 0) { gaugeMah = gaugeVoltPct(v, mA) / 100 * gaugeCap; gaugeCal = false; return; }
+  gaugeMah -= mA * dtH;                                   // + current = battery draining
+  if (gaugeFromFull) gaugeNet += mA * dtH;
+  gaugeMah = constrain(gaugeMah, 0.0f, gaugeCap);
+  // full: held at about 4.2 V and the charge current has tapered off (or stopped), for 2 minutes
+  if (v >= 4.15f && mA <= 2 && mA > -25) {
+    if (!fullSince) fullSince = now;
+    if (now - fullSince > 120000 && (!gaugeCal || gaugeMah < gaugeCap * 0.995f || !gaugeFromFull)) {
+      if (!gaugeCal) Serial.println("Battery gauge: first full charge - calibrated");
+      gaugeMah = gaugeCap; gaugeCal = true; gaugeFromFull = true; gaugeNet = 0;
+      gaugeSave(); lastSave = now;
+    }
+  } else fullSince = 0;
+  // sanity check every 30 min while resting: if counting and voltage disagree a lot, trust the voltage again
+  if (now - lastCheck > 1800000UL) {
+    lastCheck = now;
+    if (!ledsPowered && fabsf(mA) < 30) {
+      float vp = gaugeVoltPct(v, mA), gp = gaugeMah / gaugeCap * 100;
+      if (fabsf(vp - gp) > 25) {
+        Serial.printf("Battery gauge: count %.0f%% vs voltage %.0f%% - starting again from the voltage\n", gp, vp);
+        gaugeMah = vp / 100 * gaugeCap; gaugeCal = false; gaugeFromFull = false; gaugeNet = 0;
+      }
+    }
+  }
+  gaugeMagic = 0x6A1E0001; gaugeRtcMah = gaugeMah; gaugeRtcCal = gaugeCal; gaugeRtcFromFull = gaugeFromFull; gaugeRtcNet = gaugeNet;
+  if (now - lastSave > 15UL * 60 * 1000) { lastSave = now; gaugeSave(); }
+}
+float gaugePct() { return gaugeMah < 0 ? -1 : gaugeMah / gaugeCap * 100; }
+
+int battPctShown() {                                              // whole percent once calibrated, steps of 5 % while estimating
+  if (battPct < 0) return -1;
+  if (gaugeCal) return constrain((int)(battPct + 0.5f), 0, 100);
+  return constrain((int)((battPct + 2.5f) / 5) * 5, 0, 100);
+}
 
 String battText() {
   int p = battPctShown();
   switch (battState) {
-    case BS_CHARGING: return p >= 95 ? "Charging · almost full" : "Charging · about " + String(p) + "%";
+    case BS_CHARGING: {
+      if (!gaugeCal) return p >= 95 ? "Charging · almost full" : "Charging · about " + String(p) + "%";
+      String s = "Charging · " + String(p) + "%";
+      if (battMaAvg < -15 && p < 99) {
+        float h = (gaugeCap - gaugeMah) / -battMaAvg * (p > 80 ? 1.4f : 1.15f);    // the last stretch slows down
+        s += h < 1 ? " · full in under an hour" : " · full in about " + String((int)(h + 0.5f)) + " h";
+      }
+      return s;
+    }
     case BS_FULL:     return p >= 95 ? "Plugged in · full" : "Plugged in · " + String(p) + "%";
     case BS_BATTERY: {
       String s = "On battery · " + String(p) + "%";
       if (battMaSlow > 3) {
-        float h = battPct / 100.0f * BATT_MAH * 0.9f / battMaSlow;
+        float h = (gaugeCal ? gaugeMah * 0.95f : battPct / 100.0f * BATT_MAH * 0.9f) / battMaSlow;
         if (h < 1) s += " · under an hour left";
         else if (h < 48) s += " · about " + String((int)(h + 0.5f)) + " h left";
         else s += " · about " + String((int)(h / 24 + 0.5f)) + " days left";
@@ -2888,7 +3000,9 @@ void handleState() {
   if (battState != BS_NONE) {
     l["batt"] = battText();
     l["battOn"] = battState == BS_BATTERY;
-    l["battV"] = String(battV, 2) + " V, " + (battMaAvg < -1 ? "charging at " + String((int)-battMaAvg) + " mA" : battMaAvg > 1 ? "using " + String((int)battMaAvg) + " mA" : "resting");
+    l["battV"] = String(battV, 2) + " V, " + (battMaAvg < -1 ? "charging at " + String((int)-battMaAvg) + " mA" : battMaAvg > 1 ? "using " + String((int)battMaAvg) + " mA" : "resting")
+               + (gaugeCal ? " · gauge: " + String((int)(gaugeMah + 0.5f)) + " of " + String((int)(gaugeCap + 0.5f)) + " mAh" + (gaugeCapLearned ? " (health " + String((int)(gaugeCap / BATT_MAH * 100 + 0.5f)) + "%)" : "")
+                           : String(" · gauge learning: exact once the battery has been fully charged"));
   }
   l["wifi"] = WiFi.SSID();
   l["ip"] = WiFi.localIP().toString();
@@ -3070,6 +3184,7 @@ void setup() {
     }
   }
   Wire.begin();
+  gaugeBegin();
   xTaskCreate(handsTask, "hands", 4096, nullptr, 5, nullptr);
   apdsOK = apdsBegin();
   xTaskCreate(ledTask, "leds", 4096, nullptr, 3, nullptr);
@@ -3146,6 +3261,7 @@ void loop() {
     }
 
     // battery reserve for the LEDs: if the battery is running down, stop the LEDs first so the hands keep going
+    gaugeTick();
     static uint32_t lastBattCheck = 0;
     if (millis() - lastBattCheck > 10000) {
       lastBattCheck = millis();
