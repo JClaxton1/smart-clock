@@ -1437,6 +1437,10 @@ void handleSave() {
   ESP.restart();
 }
 
+// WiFi recovery (7.11): kept in RTC memory so it survives a restart, not a power cut
+RTC_NOINIT_ATTR uint32_t wifiRtcMagic, wifiRtcPortal, wifiRtcDownMin;
+const uint32_t WIFI_RTC_MAGIC = 0x57F10711;
+
 void startSetupPortal() {
   setupMode = true;
   Serial.println("Starting WiFi setup: join 'SmartClock-Setup'");
@@ -3193,7 +3197,13 @@ void setup() {
   display.epd2.selectSPI(SPI, SPISettings(4000000, MSBFIRST, SPI_MODE0));
   display.init(0, true, 10, false);
 
+  if (wifiRtcMagic != WIFI_RTC_MAGIC) { wifiRtcMagic = WIFI_RTC_MAGIC; wifiRtcPortal = 0; wifiRtcDownMin = 0; }
+  if (wifiRtcPortal) { wifiRtcPortal = 0; startSetupPortal(); return; }   // asked for from the 5 s hold while offline
   if (!connectWifi()) { startSetupPortal(); return; }
+  if (wifiRtcDownMin) {                                                     // came back after restarting itself for WiFi
+    notify("Clock back online", "WiFi had been down for about " + String(wifiRtcDownMin) + " min. It restarted itself to reconnect.", "white_check_mark");
+    wifiRtcDownMin = 0;
+  }
   startSettingsServer();
   stage5Start();
   qrUntil = millis() + 60000;          // settings QR code for the first minute (drawn by loop)
@@ -3209,9 +3219,27 @@ void loop() {
     static uint32_t since = millis();
     if (millis() - since > 10UL * 60 * 1000 && !wifiSsid.isEmpty()) ESP.restart();   // after 10 min, try the saved WiFi again
   } else {
+    // WiFi recovery, escalating: reconnect every minute; full WiFi off/on at 5 min; restart the clock at 20 min.
+    // (V1 used to only call reconnect(), which can stay stuck forever after a router reboot.)
+    static uint32_t offlineSince = 0, lastTry = 0;
+    static bool fullResetDone = false;
     if (WiFi.status() != WL_CONNECTED) {
-      static uint32_t lastTry = 0;
-      if (millis() - lastTry > 60000) { lastTry = millis(); WiFi.reconnect(); }
+      if (!offlineSince) { offlineSince = millis(); fullResetDone = false; Serial.println("WiFi lost"); }
+      uint32_t off = millis() - offlineSince;
+      if (off > 20UL * 60 * 1000) {
+        Serial.println("WiFi down 20 min: restarting to recover");
+        wifiRtcDownMin += off / 60000;
+        saveHands(true); delay(300); ESP.restart();
+      } else if (off > 5UL * 60 * 1000 && !fullResetDone) {
+        fullResetDone = true; lastTry = millis();
+        Serial.println("WiFi down 5 min: full WiFi reset");
+        WiFi.disconnect(true); delay(200); WiFi.mode(WIFI_OFF); delay(500);
+        WiFi.mode(WIFI_STA); WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+      } else if (millis() - lastTry > 60000) { lastTry = millis(); WiFi.reconnect(); }
+    } else if (offlineSince) {
+      uint32_t mins = (millis() - offlineSince) / 60000;
+      if (mins >= 5) notify("Clock back online", "WiFi was down for about " + String(mins) + " min.", "white_check_mark");
+      offlineSince = 0;
     }
     server.handleClient();
 
@@ -3254,6 +3282,12 @@ void loop() {
       weatherShowing = want != 0;
       if (want >= 3) drawOv(want, true);
       else if (want == 1) drawWeather();
+      else if (want == 2 && WiFi.status() != WL_CONNECTED) {
+        // offline: a settings QR would point at 0.0.0.0, so open the WiFi setup hotspot instead
+        drawMessage("WiFi lost", "Opening WiFi setup.", "Join SmartClock-Setup", "on your phone.");
+        wifiRtcPortal = 1; wifiRtcMagic = WIFI_RTC_MAGIC;
+        saveHands(true); delay(1500); ESP.restart();
+      }
       else if (want == 2) {
         String url = "http://" + WiFi.localIP().toString() + "/";
         drawQR("Clock settings", url.c_str(), "Point your phone camera here", WiFi.localIP().toString().c_str(), false);
